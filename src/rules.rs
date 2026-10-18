@@ -80,33 +80,124 @@ pub fn classify(people: &[Person], bed: impl RegionLike, threshold: f32) -> (Pos
     let Some(p) = selected.first() else {
         return (Pose::Unknown, 0);
     };
-    if [5, 6, 11, 12].iter().any(|&i| p.points[i][2] < 0.45) {
-        return (Pose::Unknown, 1);
-    }
-    let a = [
-        (p.points[5][0] + p.points[6][0]) / 2.,
-        (p.points[5][1] + p.points[6][1]) / 2.,
-    ];
-    let b = [
-        (p.points[11][0] + p.points[12][0]) / 2.,
-        (p.points[11][1] + p.points[12][1]) / 2.,
-    ];
-    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    let length = dx.hypot(dy);
-    if length < 0.06 {
-        return (Pose::Unknown, 1);
-    }
-    let vertical = dy / length;
-    (
+    (torso_pose(p, threshold), 1)
+}
+
+fn valid_joint(p: &[f32; 3], confidence: f32) -> bool {
+    p.iter().all(|x| x.is_finite())
+        && p[2] >= confidence
+        && (0. ..=1.).contains(&p[0])
+        && (0. ..=1.).contains(&p[1])
+}
+fn torso_pose(p: &Person, threshold: f32) -> Pose {
+    // Measure directions in image space, not the unequal normalized x/y axes.
+    let vector = |a: [f32; 2], b: [f32; 2]| [(b[0] - a[0]) * 16. / 9., b[1] - a[1]];
+    let length = |v: [f32; 2]| v[0].hypot(v[1]);
+    let classify = |v: [f32; 2]| {
+        let n = length(v);
+        if n < 0.06 {
+            return Pose::Unknown;
+        }
+        let vertical = v[1] / n;
         if vertical >= threshold {
             Pose::Upright
         } else if vertical.abs() < threshold - 0.15 {
             Pose::Lying
         } else {
             Pose::Unknown
-        },
-        1,
-    )
+        }
+    };
+    let point = |k: usize| [p.points[k][0], p.points[k][1]];
+    let sides: Vec<_> = [(5, 11), (6, 12)]
+        .into_iter()
+        .filter(|&(a, b)| valid_joint(&p.points[a], 0.45) && valid_joint(&p.points[b], 0.45))
+        .map(|(a, b)| (a, b, vector(point(a), point(b))))
+        .collect();
+    if sides.len() == 2 {
+        let (a, b) = (sides[0].2, sides[1].2);
+        let (na, nb) = (length(a), length(b));
+        if na < 0.06
+            || nb < 0.06
+            || na.max(nb) > na.min(nb) * 3.
+            || (a[0] * b[0] + a[1] * b[1]) / (na * nb) < 0.75
+        {
+            return Pose::Unknown;
+        }
+        let v = [(a[0] + b[0]) / 2., (a[1] + b[1]) / 2.];
+        let pose = classify(v);
+        // A blanket lifted by knees can produce two convincing but invented
+        // shoulder/hip pairs. Upright always needs a visible, aligned head.
+        if pose != Pose::Upright {
+            return pose;
+        }
+        let shoulder = [
+            (p.points[5][0] + p.points[6][0]) / 2.,
+            (p.points[5][1] + p.points[6][1]) / 2.,
+        ];
+        return if aligned_head(p, shoulder, v) {
+            Pose::Upright
+        } else {
+            Pose::Unknown
+        };
+    }
+    // An occluded side is allowed only with a strong complete side AND visible
+    // head evidence pointing in the same body direction. Never invent hidden hips.
+    let Some(&(shoulder, hip, v)) = sides.first() else {
+        return Pose::Unknown;
+    };
+    if !valid_joint(&p.points[shoulder], 0.6)
+        || !valid_joint(&p.points[hip], 0.6)
+        || classify(v) != Pose::Upright
+    {
+        return Pose::Unknown;
+    }
+    if aligned_head(p, point(shoulder), v) {
+        Pose::Upright
+    } else {
+        Pose::Unknown
+    }
+}
+fn aligned_head(p: &Person, shoulder: [f32; 2], v: [f32; 2]) -> bool {
+    let head: Vec<_> = p.points[..5]
+        .iter()
+        .filter(|q| valid_joint(q, 0.6))
+        .collect();
+    if head.len() < 2 {
+        return false;
+    }
+    let n = head.len() as f32;
+    let h = [
+        head.iter().map(|q| q[0]).sum::<f32>() / n,
+        head.iter().map(|q| q[1]).sum::<f32>() / n,
+    ];
+    let hs = [(shoulder[0] - h[0]) * 16. / 9., shoulder[1] - h[1]];
+    let torso = v[0].hypot(v[1]);
+    let projection = (hs[0] * v[0] + hs[1] * v[1]) / torso;
+    let lateral = (hs[0] * v[1] - hs[1] * v[0]).abs() / torso;
+    projection >= 0.02 && projection <= torso * 1.5 && lateral <= torso * 0.35 + 0.02
+}
+
+/// Independent strong head evidence may veto a false torso on a raised quilt.
+/// It never confirms lying or creates a sitting event by itself.
+pub fn head_contradicts_sitting(p: &Person, bbox: [f32; 4]) -> bool {
+    let head: Vec<_> = p.points[..5]
+        .iter()
+        .filter(|q| valid_joint(q, 0.6))
+        .collect();
+    if head.len() < 2 {
+        return false;
+    }
+    let n = head.len() as f32;
+    let center = [
+        head.iter().map(|q| q[0]).sum::<f32>() / n,
+        head.iter().map(|q| q[1]).sum::<f32>() / n,
+    ];
+    let margin_x = (bbox[2] - bbox[0]) * 0.5 + 0.015;
+    let margin_y = (bbox[3] - bbox[1]) * 0.5 + 0.015;
+    center[0] < bbox[0] - margin_x
+        || center[0] > bbox[2] + margin_x
+        || center[1] < bbox[1] - margin_y
+        || center[1] > bbox[3] + margin_y
 }
 
 #[derive(Default)]
@@ -238,7 +329,84 @@ mod tests {
         for i in [11, 12] {
             p.points[i] = [x + 0.07, 0.7, 0.9];
         }
+        p.points[0] = [x + 0.07, 0.18, 0.9];
+        p.points[1] = [x + 0.08, 0.18, 0.85];
         p
+    }
+    #[test]
+    fn independent_head_rejects_a_fake_head_on_the_quilt() {
+        let p = person(0.3);
+        assert!(!head_contradicts_sitting(&p, [0.33, 0.12, 0.42, 0.25]));
+        assert!(head_contradicts_sitting(&p, [0.62, 0.58, 0.72, 0.72]));
+    }
+    #[test]
+    fn raised_quilt_without_aligned_head_never_arms_sitting_alarm() {
+        let bed = [0., 0., 1., 1.];
+        let mut p = person(0.3);
+        assert_eq!(classify(&[p.clone()], bed, 0.55).0, Pose::Upright);
+        for head in [[0.37, 0.75, 0.95], [0.7, 0.18, 0.95], [0., 0., 0.]] {
+            p.points[0] = head;
+            p.points[1] = head;
+            let pose = classify(&[p.clone()], bed, 0.55).0;
+            assert_eq!(pose, Pose::Unknown);
+            let mut rule = Rule::default();
+            rule.update_policy(Pose::Lying, 0., 1., 60., false, true);
+            rule.update_policy(Pose::Lying, 2., 1., 60., false, true);
+            for t in 3..20 {
+                assert!(!rule.update_policy(pose, t as f64, 1., 60., false, true));
+            }
+        }
+    }
+    #[test]
+    fn occluded_side_can_sit_only_with_consistent_visible_head() {
+        let mut p = person(0.3);
+        p.points[0] = [0.; 3];
+        p.points[1] = [0.; 3];
+        p.points[6] = [0.; 3];
+        p.points[12] = [0.; 3];
+        let bed = [0., 0., 1., 1.];
+        assert_eq!(classify(&[p.clone()], bed, 0.65).0, Pose::Unknown);
+        p.points[0] = [0.37, 0.18, 0.9];
+        p.points[1] = [0.38, 0.18, 0.85];
+        assert_eq!(classify(&[p.clone()], bed, 0.65).0, Pose::Upright);
+        p.points[0][1] = 0.5;
+        p.points[1][1] = 0.5;
+        assert_eq!(classify(&[p.clone()], bed, 0.65).0, Pose::Unknown);
+        p.points[0][1] = 0.18;
+        p.points[1][1] = 0.18;
+        p.points[11][2] = 0.5;
+        assert_eq!(classify(&[p], bed, 0.65).0, Pose::Unknown);
+    }
+    #[test]
+    fn conflicting_sides_hidden_hips_and_invalid_joints_do_not_guess() {
+        let mut p = person(0.3);
+        let bed = [0., 0., 1., 1.];
+        p.points[11][2] = 0.;
+        p.points[12][2] = 0.;
+        p.points[0] = [0.37, 0.18, 0.9];
+        p.points[1] = [0.38, 0.18, 0.9];
+        assert_eq!(classify(&[p], bed, 0.65).0, Pose::Unknown);
+        let mut p = person(0.3);
+        p.points[12][1] = 0.1;
+        assert_eq!(classify(&[p], bed, 0.65).0, Pose::Unknown);
+        let mut p = person(0.3);
+        p.points[5][0] = f32::NAN;
+        p.points[6][0] = 1.2;
+        assert_eq!(classify(&[p], bed, 0.65).0, Pose::Unknown);
+    }
+    #[test]
+    fn horizontal_lying_and_near_horizontal_one_side_do_not_sit() {
+        let bed = [0., 0., 1., 1.];
+        let mut p = person(0.3);
+        for k in [11, 12] {
+            p.points[k] = [0.7, 0.3, 0.9];
+        }
+        assert_eq!(classify(&[p.clone()], bed, 0.65).0, Pose::Lying);
+        p.points[6] = [0.; 3];
+        p.points[12] = [0.; 3];
+        p.points[0] = [0.2, 0.3, 0.9];
+        p.points[1] = [0.21, 0.3, 0.9];
+        assert_eq!(classify(&[p], bed, 0.65).0, Pose::Unknown);
     }
     #[test]
     fn polygon_excludes_a_person_in_its_empty_bounding_corner() {

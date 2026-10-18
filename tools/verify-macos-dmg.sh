@@ -30,7 +30,7 @@ from pathlib import Path
 import sys,plistlib
 app=Path(sys.argv[1])
 files={str(p.relative_to(app)) for p in app.rglob('*') if p.is_file()}
-expected={'Contents/Resources/PillowGuard.icns','Contents/Info.plist','Contents/MacOS/laoren','Contents/Resources/bin/ffmpeg','Contents/Resources/models/yolov8n-pose.onnx','Contents/Resources/FFmpeg-许可说明.txt','Contents/_CodeSignature/CodeResources'}
+expected={'Contents/Resources/PillowGuard.icns','Contents/Info.plist','Contents/MacOS/laoren','Contents/Resources/bin/ffmpeg','Contents/Resources/models/yolov8n-pose.onnx','Contents/Resources/models/head-detector.onnx','Contents/Resources/HeadDetector-LICENSE.txt','Contents/Resources/FFmpeg-许可说明.txt','Contents/_CodeSignature/CodeResources'}
 with (app/'Contents/Info.plist').open('rb') as f: info=plistlib.load(f)
 assert info['CFBundleIconFile']=='PillowGuard.icns'
 assert (app/'Contents/Resources/PillowGuard.icns').read_bytes()[:4]==b'icns'

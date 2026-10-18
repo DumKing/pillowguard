@@ -1,9 +1,12 @@
 mod assist;
+mod captures;
 mod care;
 mod channels;
 mod credentials;
+mod head;
 mod history;
 mod notifications;
+mod occupancy;
 mod region;
 mod rules;
 use region::{Region, RegionLike};
@@ -49,6 +52,7 @@ struct Config {
     test_text: String,
     channels: Vec<String>,
     bed: Region,
+    rest_head_region: Option<Region>,
     hold: f64,
     cooldown: f64,
     threshold: f32,
@@ -77,6 +81,7 @@ impl Default for Config {
             test_text: "枕安通知测试：当前状态为{status}，发送时间{time}。".into(),
             channels: vec!["speaker".into()],
             bed: [0.1, 0.2, 0.8, 0.7].into(),
+            rest_head_region: None,
             hold: 2.,
             cooldown: 60.,
             threshold: 0.65,
@@ -92,6 +97,9 @@ impl Default for Config {
 impl Config {
     fn validate(&self) -> Result<()> {
         self.care.validate(&self.bed)?;
+        if let Some(r) = &self.rest_head_region {
+            r.validate()?;
+        }
         if !self.lost_after.is_finite() || !(10. ..=300.).contains(&self.lost_after) {
             bail!("无法判断提醒时间应为 10 至 300 秒");
         }
@@ -207,6 +215,7 @@ struct Event {
 }
 #[derive(Serialize)]
 struct View {
+    suspected_lying: bool,
     assisted: bool,
     people_uncertain: bool,
     history_status: String,
@@ -226,6 +235,7 @@ struct View {
 impl Default for View {
     fn default() -> Self {
         Self {
+            suspected_lying: false,
             assisted: false,
             people_uncertain: false,
             history_status: "历史记录已保存".into(),
@@ -245,6 +255,7 @@ impl Default for View {
     }
 }
 struct Inner {
+    captures: captures::Store,
     care_book: care::Book,
     escalation_id: Option<String>,
     care_book_path: Option<PathBuf>,
@@ -361,6 +372,8 @@ async fn state(State(app): State<App>) -> Json<Value> {
     let i = app.inner.lock().unwrap();
     let mut v = serde_json::to_value(&i.view).unwrap();
     v["care_alerts"] = json!(i.care_book.alerts);
+    v["alert_captures"] = i.captures.metadata();
+    v["capture_status"] = json!(i.captures.status);
     v["config"] = json!(i.config);
     v["calibration"] = json!({"ready":assist::ready(&i.config.assist_lying,&i.config.assist_upright),"sample_ready":i.samples.capture().is_some()});
     v["push_channels"] = json!(i
@@ -376,6 +389,7 @@ async fn state(State(app): State<App>) -> Json<Value> {
     v["has_wecom"] = json!(!i.wecom.is_empty());
     v["has_dingtalk"] = json!(!i.dingtalk.is_empty());
     v["has_dingtalk_secret"] = json!(!i.dingtalk_secret.is_empty());
+    v["head_detection_available"] = json!(app.root.join("models/head-detector.onnx").exists());
     v["engine"] = json!("Rust / ONNX Runtime");
     v["schedule"] = json!({"active":i.config.active(),"clock":Utc::now().with_timezone(&Shanghai).format("%H:%M").to_string(),"hold":i.config.hold,"cooldown":i.config.cooldown,"timezone":"Asia/Shanghai"});
     Json(v)
@@ -528,6 +542,10 @@ fn trigger_care(app: &App, kind: care::Kind, reason: Option<&str>, generation: u
         }
         let id = i.care_book.create(kind, text.clone(), now, demo);
         persist_care(&i);
+        let fresh = !demo && i.view.last_frame.is_some_and(|t| now >= t && now - t <= 2.);
+        let image = if fresh { i.frame.clone() } else { vec![] };
+        i.captures
+            .record(id.clone(), clock, kind.label().into(), demo, &image);
         App::event(
             &mut i,
             format!(
@@ -670,6 +688,22 @@ async fn escalation_burst(app: App, generation: u64, dispatch: Dispatch) {
         i.escalation_id = None;
     }
 }
+async fn alert_capture(
+    State(app): State<App>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match app.inner.lock().unwrap().captures.image(&id) {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
 async fn frame(State(app): State<App>) -> Response {
     let bytes = app.inner.lock().unwrap().frame.clone();
     if bytes.is_empty() {
@@ -805,6 +839,9 @@ async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
             bail!("更换视频来源前请先停止监测");
         }
         if geometry_changed {
+            if saved.camera_source != i.camera_source {
+                c.rest_head_region = None;
+            }
             c.assist_enabled = false;
             c.assist_lying = None;
             c.assist_upright = None;
@@ -841,6 +878,9 @@ async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
             i.samples.clear();
         }
         i.push_channels = saved.push_channels.unwrap_or_default();
+        if i.config.rest_head_region != c.rest_head_region {
+            i.view.suspected_lying = false;
+        }
         i.config = c;
         i.token = saved.token;
         i.webhook = saved.webhook;
@@ -1270,6 +1310,7 @@ fn observe_frame(
         let active = i.config.active() || (simulated && i.view.mode.as_deref() == Some("demo"));
         let pose = if active { pose } else { Pose::Unknown };
         i.view.pose = pose;
+        i.view.suspected_lying = false;
         i.view.assisted = active && assisted;
         i.view.people_uncertain = pose == Pose::Multiple && uncertain;
         if pose == Pose::Multiple && old != Pose::Multiple {
@@ -1368,6 +1409,17 @@ async fn watch_visibility(app: App) {
             if generation != i.generation {
                 generation = i.generation;
                 watchdog = rules::Watchdog::default();
+            }
+            let fresh = i.view.running
+                && i.config.active()
+                && i.view
+                    .last_frame
+                    .is_some_and(|t| Utc::now().timestamp_millis() as f64 / 1000. - t <= 2.);
+            if !fresh && i.view.suspected_lying {
+                i.view.suspected_lying = false;
+                if i.view.message.starts_with("疑似卧床") {
+                    i.view.message = "画面未更新，疑似卧床线索已失效".into();
+                }
             }
             if !i.config.lost_alert_enabled
                 || !i.view.running
@@ -1507,6 +1559,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
     let detector = Arc::new(Mutex::new(detector));
     let begin = Instant::now();
     let mut index = 0u64;
+    let mut occupancy = occupancy::Tracker::default();
     loop {
         {
             let i = app.inner.lock().unwrap();
@@ -1515,6 +1568,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             }
         }
         while !app.inner.lock().unwrap().config.active() {
+            occupancy.clear();
             {
                 let mut i = app.inner.lock().unwrap();
                 if i.generation != generation {
@@ -1527,6 +1581,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 i.samples.clear();
                 i.view.assisted = false;
                 i.view.last_frame = None;
+                i.view.suspected_lying = false;
                 i.view.message = "时段外，等待监测时间".into();
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1566,7 +1621,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
         }
         cmd.args([
             "-vf",
-            "fps=4,scale=640:480",
+            "fps=4,scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
             "-pix_fmt",
             "rgb24",
             "-f",
@@ -1579,7 +1634,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
         let mut child = cmd.spawn()?;
         let mut output = child.stdout.take().unwrap();
         loop {
-            let mut bytes = vec![0u8; 640 * 480 * 3];
+            let mut bytes = vec![0u8; 1280 * 720 * 3];
             let read =
                 tokio::time::timeout(Duration::from_secs(12), output.read_exact(&mut bytes)).await;
             {
@@ -1594,6 +1649,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 break;
             }
             if !matches!(read, Ok(Ok(_))) {
+                occupancy.clear();
                 let status = child.try_wait()?;
                 let _ = child.kill().await;
                 observe(
@@ -1616,6 +1672,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 {
                     let mut i = app.inner.lock().unwrap();
                     i.view.last_frame = None;
+                    i.view.suspected_lying = false;
                     if i.view.message != "视频流中断，5 秒后重新连接" {
                         App::event(&mut i, "摄像头断流，当前无法判断姿态");
                     }
@@ -1626,10 +1683,19 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             }
             index += 1;
             let detector = detector.clone();
-            let pixels = bytes.clone();
-            let people =
-                tokio::task::spawn_blocking(move || detector.lock().unwrap().detect(&pixels))
-                    .await??;
+            let c = app.inner.lock().unwrap().config.clone();
+            let (people, mut bytes, heads, head_conflict) =
+                tokio::task::spawn_blocking(move || {
+                    detector.lock().unwrap().detect_detailed(
+                        &bytes,
+                        &c.bed,
+                        c.person_confidence,
+                        c.multiple_confidence,
+                        c.threshold,
+                        c.rest_head_region.as_ref(),
+                    )
+                })
+                .await??;
             let (c, valid) = {
                 let i = app.inner.lock().unwrap();
                 (
@@ -1676,6 +1742,39 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     }
                 }
             }
+            if pose == Pose::Upright && head_conflict {
+                pose = Pose::Unknown;
+                assisted = false;
+            }
+            let suspected = occupancy.update(
+                if replay {
+                    index as f64 / 4.
+                } else {
+                    begin.elapsed().as_secs_f64()
+                },
+                &heads,
+                &c.bed,
+                &c.rest_head_region,
+                pose,
+                count,
+            );
+            draw_overlay(&mut bytes, &people, &c.bed);
+            let mut jpeg = vec![];
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75).encode(
+                &bytes,
+                640,
+                360,
+                image::ExtendedColorType::Rgb8,
+            )?;
+            {
+                let mut i = app.inner.lock().unwrap();
+                if i.generation != generation || !i.view.running {
+                    return Ok(());
+                }
+                i.frame = jpeg;
+                i.view.last_frame =
+                    Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
+            }
             observe_frame(
                 &app,
                 pose,
@@ -1690,14 +1789,6 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 uncertain,
                 assisted,
             );
-            draw_overlay(&mut bytes, &people, &c.bed);
-            let mut jpeg = vec![];
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75).encode(
-                &bytes,
-                640,
-                480,
-                image::ExtendedColorType::Rgb8,
-            )?;
             let mut i = app.inner.lock().unwrap();
             if i.generation != generation {
                 return Ok(());
@@ -1705,7 +1796,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             if i.view.message == "视频流中断，5 秒后重新连接" {
                 App::event(&mut i, "摄像头画面已恢复，等待重新确认躺卧");
             }
-            i.frame = jpeg;
+            i.view.suspected_lying = suspected;
             i.view.last_frame = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
             i.view.video_position = if replay { index as f64 / 4. } else { 0. };
             i.view.fps = 4.;
@@ -1715,8 +1806,21 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 "多人场景，监测暂停"
             } else if replay {
                 "视频逐帧分析中（不发送通知）"
+            } else if suspected {
+                "疑似卧床：卧床头部区域内持续检测到头部，躺卧姿态未确认"
             } else if pose == Pose::Unknown && count > 0 {
                 "检测到人体，但姿态受遮挡影响"
+            } else if pose == Pose::Unknown
+                && heads.iter().any(|h| {
+                    h.score >= 0.5
+                        && c.rest_head_region
+                            .as_ref()
+                            .is_some_and(|r| region::overlap(r, h.bbox) >= 0.5)
+                })
+            {
+                "检测到头部候选，但卧床线索仍不足，姿态未确认"
+            } else if pose == Pose::Unknown && count == 0 {
+                "未检测到清晰人体，姿态无法判断"
             } else {
                 "监测中"
             }
@@ -1728,8 +1832,8 @@ fn draw_overlay(rgb: &mut [u8], people: &[rules::Person], bed: &Region) {
     let mut rect = |x1: f32, y1: f32, x2: f32, y2: f32, color: [u8; 3]| {
         let x1 = (x1 * 639.).clamp(0., 639.) as usize;
         let x2 = (x2 * 639.).clamp(0., 639.) as usize;
-        let y1 = (y1 * 479.).clamp(0., 479.) as usize;
-        let y2 = (y2 * 479.).clamp(0., 479.) as usize;
+        let y1 = (y1 * 359.).clamp(0., 359.) as usize;
+        let y2 = (y2 * 359.).clamp(0., 359.) as usize;
         for x in x1..=x2 {
             for y in [y1, y2] {
                 rgb[(y * 640 + x) * 3..(y * 640 + x) * 3 + 3].copy_from_slice(&color);
@@ -1760,12 +1864,12 @@ fn draw_overlay(rgb: &mut [u8], people: &[rules::Person], bed: &Region) {
         let a = points[k];
         let b = points[(k + 1) % points.len()];
         let steps = ((b[0] - a[0]).abs() * 640.)
-            .max((b[1] - a[1]).abs() * 480.)
+            .max((b[1] - a[1]).abs() * 360.)
             .ceil() as usize;
         for step in 0..=steps.max(1) {
             let t = step as f32 / steps.max(1) as f32;
             let x = ((a[0] + (b[0] - a[0]) * t) * 639.).clamp(0., 639.) as usize;
-            let y = ((a[1] + (b[1] - a[1]) * t) * 479.).clamp(0., 479.) as usize;
+            let y = ((a[1] + (b[1] - a[1]) * t) * 359.).clamp(0., 359.) as usize;
             rgb[(y * 640 + x) * 3..(y * 640 + x) * 3 + 3].copy_from_slice(&[80, 210, 140]);
         }
     }
@@ -1833,6 +1937,7 @@ async fn action(
                 i.view.people = 0;
                 i.view.armed = false;
                 i.view.last_frame = None;
+                i.view.suspected_lying = false;
                 i.view.video_position = 0.;
                 i.view.message = if mode == "demo" {
                     "演示模式"
@@ -1879,6 +1984,7 @@ async fn action(
                                 i.view.pose = Pose::Unknown;
                                 i.view.people_uncertain = false;
                                 i.view.last_frame = None;
+                                i.view.suspected_lying = false;
                                 i.view.message =
                                     "无法启动视频监测，请检查视频来源、资源文件及摄像头权限".into();
                                 let message = i.view.message.clone();
@@ -1914,6 +2020,7 @@ async fn action(
                 i.view.people = 0;
                 i.view.armed = false;
                 i.view.last_frame = None;
+                i.view.suspected_lying = false;
                 i.view.message = "已停止".into();
             }
             "demo" => {
@@ -2050,6 +2157,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
     };
     let app = App {
         inner: Arc::new(Mutex::new(Inner {
+            captures: captures::Store::load(data.join("alert-captures.json")),
             care_book,
             escalation_id: None,
             care_book_path,
@@ -2131,6 +2239,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
         .route("/api/ha-check", post(ha_check))
         .route("/api/source/reveal", post(source_reveal))
         .route("/frame.jpg", get(frame))
+        .route("/api/alert-capture/{id}", get(alert_capture))
         .route("/api/config", post(save))
         .route("/api/token/{action}", post(token_action))
         .route("/api/{action}", post(action))
@@ -2191,22 +2300,73 @@ fn data_dir(root: &Path) -> PathBuf {
     root.join("data")
 }
 fn main() -> Result<()> {
-    if std::env::args().any(|a| a == "--self-test") {
+    if std::env::args().any(|a| a == "--self-test" || a == "--head-self-test") {
         let root = root();
         ort::init().with_name("laoren-test").commit()?;
         let mut detector = vision::Detector::new(&root.join("models/yolov8n-pose.onnx"))?;
-        let image = std::env::args().skip_while(|a| a != "--self-test").nth(1);
+        let image = std::env::args()
+            .skip_while(|a| a != "--self-test" && a != "--head-self-test")
+            .nth(1);
         let rgb = if let Some(path) = image {
-            image::open(path)?
-                .resize_exact(640, 480, image::imageops::FilterType::Triangle)
-                .into_rgb8()
-                .into_raw()
+            let scaled = image::open(path)?
+                .resize(1280, 720, image::imageops::FilterType::Triangle)
+                .into_rgb8();
+            let mut frame = image::RgbImage::new(1280, 720);
+            image::imageops::overlay(
+                &mut frame,
+                &scaled,
+                ((1280 - scaled.width()) / 2) as i64,
+                ((720 - scaled.height()) / 2) as i64,
+            );
+            frame.into_raw()
         } else {
-            vec![0; 640 * 480 * 3]
+            vec![0; 1280 * 720 * 3]
         };
-        let people = detector.detect(&rgb)?;
-        let (pose, count) = rules::classify(&people, [0., 0., 1., 1.], 0.65);
-        println!("Rust ONNX 自检完成：人数={count}, 姿态={pose:?}");
+        if std::env::args().any(|a| a == "--head-self-test") {
+            let mut head = crate::head::Detector::new(&root.join("models/head-detector.onnx"))?;
+            // Head-only diagnostics must retain the source aspect ratio, just as
+            // detect_region does for real camera crops.
+            let frame = if let Some(path) = std::env::args()
+                .skip_while(|a| a != "--head-self-test")
+                .nth(1)
+            {
+                image::open(path)?.into_rgb8()
+            } else {
+                image::RgbImage::from_raw(1280, 720, rgb).unwrap()
+            };
+            let region: Region = std::env::args()
+                .skip_while(|a| a != "--head-self-test")
+                .nth(2)
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?
+                .unwrap_or_else(|| [0., 0., 1., 1.].into());
+            region.validate()?;
+            let heads = head.detect_region(&frame, &region)?;
+            println!(
+                "头部自检完成：线索={}, 最高分={:.2}",
+                heads.len(),
+                heads.iter().map(|h| h.score).fold(0f32, f32::max)
+            );
+            println!("候选框：{}", serde_json::to_string(&heads)?);
+            return Ok(());
+        }
+        let (people, _, heads, head_conflict) = detector.detect_detailed(
+            &rgb,
+            &[0., 0., 1., 1.].into(),
+            0.5,
+            0.75,
+            0.65,
+            Some(&[0., 0., 1., 1.].into()),
+        )?;
+        let (mut pose, count) = rules::classify(&people, [0., 0., 1., 1.], 0.65);
+        if head_conflict && pose == Pose::Upright {
+            pose = Pose::Unknown;
+        }
+        println!(
+            "Rust ONNX 自检完成：人数={count}, 姿态={pose:?}, 头部线索={}, 最高分={:.2}",
+            heads.len(),
+            heads.iter().map(|h| h.score).fold(0f32, f32::max)
+        );
         return Ok(());
     }
     #[cfg(feature = "desktop")]

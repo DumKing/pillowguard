@@ -10,6 +10,8 @@ $Destination='dist/PillowGuard-Windows'
 New-Item -ItemType Directory -Force "$Destination/bin","$Destination/models" | Out-Null
 Copy-Item $Exe "$Destination/PillowGuard.exe" -Force
 Copy-Item $FfmpegPath "$Destination/bin/ffmpeg.exe" -Force
+Copy-Item 'models/head-detector.onnx' "$Destination/models/head-detector.onnx" -Force
+Copy-Item 'assets/HeadDetector-LICENSE.txt' "$Destination/HeadDetector-LICENSE.txt" -Force
 Copy-Item 'models/yolov8n-pose.onnx' "$Destination/models/yolov8n-pose.onnx" -Force
 @'
 @echo off

@@ -20,6 +20,8 @@
     },
     "resources": [
       "models/yolov8n-pose.onnx",
+      "models/head-detector.onnx",
+      "assets/HeadDetector-LICENSE.txt",
       "bin/ffmpeg"
     ],
     "icon": [
