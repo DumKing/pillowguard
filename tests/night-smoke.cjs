@@ -1,12 +1,12 @@
 // Synthetic black frames only: no real camera, credentials or external recipients.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),http=require('node:http'),assert=require('node:assert/strict'),{spawn}=require('node:child_process');
-const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'laoren-night-'));let child,receiver;const messages=[];
+const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'zhenan-night-'));let child,receiver;const messages=[];
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(name,data){const r=await fetch('http://127.0.0.1:8765/api/'+name,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});assert(r.ok,name+':'+r.status);return r.json()}
 (async()=>{try{
 receiver=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{messages.push(JSON.parse(body));res.end('{}')})});await new Promise(r=>receiver.listen(0,'127.0.0.1',r));
 const fake=path.join(dir,'frames.cjs');fs.writeFileSync(fake,'#!/usr/bin/env node\nconst frame=Buffer.alloc(1280*720*3);setInterval(()=>{process.stdout.write(frame)},250);\n',{mode:0o700});
-child=spawn(path.join(root,'bin/laoren-server'),[],{cwd:root,env:{...process.env,LAOREN_DATA_DIR:dir,LAOREN_FFMPEG:fake},stdio:'ignore'});
+child=spawn(path.join(root,'bin/zhenan-server'),[],{cwd:root,env:{...process.env,ZHENAN_DATA_DIR:dir,ZHENAN_FFMPEG:fake},stdio:'ignore'});
 for(let n=0;n<60;n++){await pause(100);if(child.exitCode!==null)throw Error('stop the existing app before testing');try{await api('state');break}catch{}}
 await api('config',{source_mode:'camera',source:'http://127.0.0.1:9/synthetic',lost_after:10,lost_alert_enabled:false,push_channels:[{id:'local',name:'本地模拟接收端',kind:'webhook',enabled:true,url:'http://127.0.0.1:'+receiver.address().port}]});await api('start',{mode:'camera'});
 await pause(12000);assert.equal(messages.length,0,'disabled anomaly reminders must stay silent');

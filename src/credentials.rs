@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn survives_reload_replace_and_clear() {
         let path = std::env::temp_dir().join(format!(
-            "laoren-credentials-test-{}-{}",
+            "zhenan-credentials-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

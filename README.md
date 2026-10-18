@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="assets/pillowguard-icon-256.png" width="128" alt="枕安 PillowGuard 图标">
+  <img src="assets/zhenan-icon-256.png" width="128" alt="枕安图标">
 </p>
 
-<h1 align="center">枕安 · PillowGuard</h1>
+<h1 align="center">枕安</h1>
 <p align="center">本地识别老人坐起，让床旁守护及时一点。</p>
 
 枕安是一款用 Rust 开发的床旁姿态监测与通知软件。通过本机或网络摄像头识别床位内的持续坐起，按规则向小爱音箱、Home Assistant、企业微信、钉钉和自定义 Webhook 发送提醒。
 
 视频在运行设备上分析，默认不上传视频，也不保存录像。桌面版使用 Tauri；运行安装包不需要 Python 或 Rust 环境。
 
-**当前版本：0.3.0。仅启用持续坐起提醒。** 当前姿态模型不能保证区分坐姿与站姿；床沿、地面区域只保存备用，不触发离床、站起或跌倒告警。识别受光线、机位和遮挡影响，仍需结合实际照护。
+**当前版本：0.3.1。仅启用持续坐起提醒。** 当前姿态模型不能保证区分坐姿与站姿；床沿、地面区域只保存备用，不触发离床、站起或跌倒告警。识别受光线、机位和遮挡影响，仍需结合实际照护。
 
 ## 功能
 
@@ -44,7 +44,7 @@ CI 的编译结果不代表对应设备的摄像头或长期值守已经验收�
 
 ### 已有 Mac 安装包
 
-1. 打开 `枕安-0.3.0-Mac-x86_64.dmg`，把「枕安.app」拖入 Applications。
+1. 打开 `枕安-0.3.1-Mac-x86_64.dmg`，把「枕安.app」拖入 Applications。
 2. 从「应用程序」启动，按系统提示允许摄像头和本地网络访问。
 3. 选择视频来源，绘制绿色床位区域，保存后开始监测。
 4. 在「通知渠道」添加需要的渠道，保存并单独测试送达。
@@ -105,13 +105,13 @@ CI 的编译结果不代表对应设备的摄像头或长期值守已经验收�
 
 | 运行方式 | 默认数据目录 |
 |---|---|
-| macOS 桌面 | `~/Library/Application Support/Shouwang` |
-| Windows 桌面 | `%LOCALAPPDATA%\Shouwang` |
-| Linux 桌面 | `~/.local/share/shouwang` |
-| 无桌面服务 | 资源目录下的 `data/`，或 `LAOREN_DATA_DIR` 指定位置 |
-| Docker Compose | `laoren-data` 持久数据卷 |
+| macOS 桌面 | `~/Library/Application Support/枕安` |
+| Windows 桌面 | `%LOCALAPPDATA%\枕安` |
+| Linux 桌面 | `~/.local/share/zhenan` |
+| 无桌面服务 | 资源目录下的 `data/`，或 `ZHENAN_DATA_DIR` 指定位置 |
+| Docker Compose | `laoren-data` 持久数据卷（沿用已有卷） |
 
-项目原名“守望”。为兼容已安装版本，保留 `Shouwang` 数据目录、`com.laoren.shouwang` 应用标识、旧规则备份格式及 `LAOREN_*` 环境变量；内部可执行文件名仍为 `laoren`，对外应用名称为「枕安」。本地开发目录无需更名。
+软件名称统一为「枕安」，命令行程序名为 `zhenan`，新环境变量采用 `ZHENAN_*`。桌面版首次升级会将旧数据目录整体迁移到上表目录，保留配置、凭据、历史及告警画面；新目录已存在时不覆盖，迁移失败时继续读取旧目录。旧版 `LAOREN_*` 环境变量和 `shouwang-rules` 规则备份仍可读取，新设置使用新名称。为延续系统授权，应用内部标识 `com.laoren.shouwang` 保持不变；Docker 沿用原有数据卷 `laoren-data`，避免升级后配置丢失。GitHub 仓库地址和本地开发目录保持原路径。
 
 令牌、Webhook、应用 Secret、摄像头地址单独保存在 `credentials.json`，**本地未加密**；macOS / Linux 按 0600 权限保存。普通状态轮询与规则备份不返回这些凭据。卸载应用不会自动删除数据目录。
 
@@ -130,10 +130,10 @@ cargo build --release --locked
 
 模型下载脚本会检查 SHA-256，不覆盖校验不匹配的已有模型。Windows 可在 Git Bash 中执行脚本。
 
-将相应平台的 FFmpeg 放到 `bin/ffmpeg`（Windows 为 `bin/ffmpeg.exe`），或通过 `LAOREN_FFMPEG` 指定其绝对路径。运行无桌面服务：
+将相应平台的 FFmpeg 放到 `bin/ffmpeg`（Windows 为 `bin/ffmpeg.exe`），或通过 `ZHENAN_FFMPEG` 指定其绝对路径。运行无桌面服务：
 
 ```bash
-export LAOREN_FFMPEG="/absolute/path/to/ffmpeg"
+export ZHENAN_FFMPEG="/absolute/path/to/ffmpeg"
 cargo run --release --locked
 ```
 
@@ -144,7 +144,7 @@ cargo run --release --locked
 ```bash
 cargo build --release --features desktop --locked
 bash tools/package-macos-dmg.sh release
-bash tools/verify-macos-dmg.sh dist/枕安-0.3.0-Mac-x86_64.dmg
+bash tools/verify-macos-dmg.sh dist/枕安-0.3.1-Mac-x86_64.dmg
 ```
 
 打包脚本需要 `bin/ffmpeg` 和已下载的模型，输出 `dist/枕安-版本-Mac-架构.dmg` 及 SHA-256 校验文件；上方验证示例针对 Intel Mac。`CARGO_TARGET_DIR` 可覆盖默认构建目录。ZIP 打包见 `tools/package-macos-archive.sh`，图标生成见 `tools/build-icons.sh`。
@@ -158,13 +158,13 @@ cargo build --release --features desktop --locked
 powershell -File tools/package-windows.ps1 -FfmpegPath C:\path\to\ffmpeg.exe
 ```
 
-输出 `dist/PillowGuard-Windows.zip`。解压完整文件夹后打开 `PillowGuard.exe`，保留 `bin` 和 `models`，尚需 Windows 实机验证。
+输出 `dist/枕安-Windows.zip`。解压完整文件夹后打开 `枕安.exe`，保留 `bin` 和 `models`，尚需 Windows 实机验证。
 
 ### Linux / NAS
 
 ```bash
 cp .env.example .env
-# 编辑 .env，为 LAOREN_PASSWORD 设置至少 12 字符的管理密码
+# 编辑 .env，为 ZHENAN_PASSWORD 设置至少 12 字符的管理密码
 # 首次构建需要访问容器镜像源、Rust 依赖源和模型下载源
 docker compose up -d --build
 ```
@@ -175,11 +175,11 @@ docker compose up -d --build
 
 | 变量 | 用途 |
 |---|---|
-| `LAOREN_HOME` | 资源目录，包含 `models/` 与 `bin/` |
-| `LAOREN_DATA_DIR` | 配置、凭据、历史及告警记录目录 |
-| `LAOREN_FFMPEG` | FFmpeg 可执行文件路径 |
-| `LAOREN_BIND` | 服务监听地址，默认 `127.0.0.1` |
-| `LAOREN_PASSWORD` | 服务访问密码，NAS 非本机访问时使用 |
+| `ZHENAN_HOME` | 资源目录，包含 `models/` 与 `bin/` |
+| `ZHENAN_DATA_DIR` | 配置、凭据、历史及告警记录目录 |
+| `ZHENAN_FFMPEG` | FFmpeg 可执行文件路径 |
+| `ZHENAN_BIND` | 服务监听地址，默认 `127.0.0.1` |
+| `ZHENAN_PASSWORD` | 服务访问密码，NAS 非本机访问时使用 |
 | `ORT_LIB_LOCATION` | 构建时 ONNX Runtime 安装目录 |
 | `CARGO_TARGET_DIR` | Cargo 构建产物目录，打包脚本也读取该值 |
 
@@ -228,7 +228,7 @@ node tests/alert-capture-ui.cjs
 ```bash
 cargo build --locked
 mkdir -p bin
-cp target/debug/laoren bin/laoren-server
+cp target/debug/zhenan bin/zhenan-server
 node tests/channels-smoke.cjs
 node tests/schedule-smoke.cjs
 node tests/regions-smoke.cjs
@@ -240,7 +240,7 @@ node tests/care-smoke.cjs
 
 ## 常见问题
 
-- **提示端口被占用**：退出其他枕安或旧版守望实例后再打开。
+- **提示端口被占用**：退出其他已运行的枕安实例后再打开。
 - **Mac 摄像头或 HA 不可用**：检查「系统设置 → 隐私与安全性 → 摄像头 / 本地网络」中的应用权限。
 - **单人被误判为多人**：准确描绘床位，提高第二人阈值前先检查画面；阈值过高也可能漏掉真实照护人。
 - **被子盖住后没有告警**：普通规则需要卧床基线，可考虑头肩辅助或“无法识别后坐起”选项；头肩完全不可见时不能保证识别。

@@ -1,4 +1,5 @@
 mod assist;
+mod brand;
 mod captures;
 mod care;
 mod channels;
@@ -1470,18 +1471,16 @@ fn asset(root: &Path, name: &str) -> PathBuf {
     root.join("bin").join(name)
 }
 fn ffmpeg(root: &Path) -> PathBuf {
-    std::env::var_os("LAOREN_FFMPEG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            asset(
-                root,
-                if cfg!(windows) {
-                    "ffmpeg.exe"
-                } else {
-                    "ffmpeg"
-                },
-            )
-        })
+    brand::env("FFMPEG").map(PathBuf::from).unwrap_or_else(|| {
+        asset(
+            root,
+            if cfg!(windows) {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            },
+        )
+    })
 }
 #[cfg(any(target_os = "windows", test))]
 fn first_windows_camera(text: &str) -> Option<String> {
@@ -2081,25 +2080,23 @@ async fn action(
     }
 }
 fn root() -> PathBuf {
-    std::env::var_os("LAOREN_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let cwd = std::env::current_dir().unwrap();
-            if cwd.join("models").exists() {
-                cwd
+    brand::env("HOME").map(PathBuf::from).unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap();
+        if cwd.join("models").exists() {
+            cwd
+        } else {
+            let dir = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            if dir.join("../Resources/models").exists() {
+                dir.join("../Resources")
             } else {
-                let dir = std::env::current_exe()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .to_path_buf();
-                if dir.join("../Resources/models").exists() {
-                    dir.join("../Resources")
-                } else {
-                    dir
-                }
+                dir
             }
-        })
+        }
+    })
 }
 async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
     let root = root();
@@ -2121,13 +2118,15 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
         saved.dingtalk_secret.clear();
         credentials::save_all(&data, &saved)?;
     }
-    ort::init().with_name("laoren").commit()?;
-    let password = std::env::var("LAOREN_PASSWORD")
-        .ok()
+    ort::init().with_name("zhenan").commit()?;
+    let password = brand::env("PASSWORD")
+        .and_then(|v| v.into_string().ok())
         .filter(|s| s.len() >= 12);
-    let bind = std::env::var("LAOREN_BIND").unwrap_or("127.0.0.1".into());
+    let bind = brand::env("BIND")
+        .and_then(|v| v.into_string().ok())
+        .unwrap_or("127.0.0.1".into());
     if bind != "127.0.0.1" && password.is_none() {
-        bail!("局域网访问须设置至少 12 字符的 LAOREN_PASSWORD");
+        bail!("局域网访问须设置至少 12 字符的 ZHENAN_PASSWORD");
     }
     let history_file = data.join("history.json");
     let (events, history_path, history_status) = match history::load(&history_file) {
@@ -2218,7 +2217,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "image/png")],
-                    &include_bytes!("../assets/pillowguard-icon-256.png")[..],
+                    &include_bytes!("../assets/zhenan-icon-256.png")[..],
                 )
             }),
         )
@@ -2282,19 +2281,23 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
     Ok(())
 }
 fn data_dir(root: &Path) -> PathBuf {
-    if let Some(path) = std::env::var_os("LAOREN_DATA_DIR") {
+    if let Some(path) = brand::env("DATA_DIR") {
         return path.into();
     }
     if cfg!(feature = "desktop") {
         if cfg!(windows) {
-            return PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
-                .join("Shouwang");
+            let parent = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default());
+            return brand::desktop_data(&parent, "Shouwang", "枕安");
         }
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         return if cfg!(target_os = "macos") {
-            home.join("Library/Application Support/Shouwang")
+            brand::desktop_data(
+                &home.join("Library/Application Support"),
+                "Shouwang",
+                "枕安",
+            )
         } else {
-            home.join(".local/share/shouwang")
+            brand::desktop_data(&home.join(".local/share"), "shouwang", "zhenan")
         };
     }
     root.join("data")
@@ -2302,7 +2305,7 @@ fn data_dir(root: &Path) -> PathBuf {
 fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--self-test" || a == "--head-self-test") {
         let root = root();
-        ort::init().with_name("laoren-test").commit()?;
+        ort::init().with_name("zhenan-test").commit()?;
         let mut detector = vision::Detector::new(&root.join("models/yolov8n-pose.onnx"))?;
         let image = std::env::args()
             .skip_while(|a| a != "--self-test" && a != "--head-self-test")
@@ -2389,7 +2392,7 @@ fn main() -> Result<()> {
                     "main",
                     tauri::WebviewUrl::External("http://127.0.0.1:8765/".parse()?),
                 )
-                .title("枕安 · 老人起身监护")
+                .title("枕安")
                 .inner_size(1280., 900.)
                 .build()?;
                 Ok(())

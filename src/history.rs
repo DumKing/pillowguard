@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn reload_and_corruption() {
         let dir = std::env::temp_dir().join(format!(
-            "laoren-history-{}",
+            "zhenan-history-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

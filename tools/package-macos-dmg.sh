@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 PROFILE=${1:-release}
 ARCH=$(uname -m)
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
-STAGE=$(mktemp -d "${TMPDIR:-/private/tmp}/shouwang-installer.XXXXXX")
+STAGE=$(mktemp -d "${TMPDIR:-/private/tmp}/zhenan-installer.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 bash tools/package-macos.sh "$PROFILE" "$STAGE/枕安.app"
 ln -s /Applications "$STAGE/Applications"
@@ -19,7 +19,7 @@ cat > "$STAGE/安装说明.txt" <<'TEXT'
 如使用小爱音箱播报，需要连接你已部署的 Home Assistant。
 
 首次使用摄像头和局域网设备时，请允许摄像头及本地网络访问。
-通知设置、密钥和历史记录保存在 ~/Library/Application Support/Shouwang，卸载应用不会自动删除这些数据。
+通知设置、密钥和历史记录保存在 ~/Library/Application Support/枕安，卸载应用不会自动删除这些数据。
 安装包不包含开发者的摄像头地址、令牌、推送密钥或监测记录。
 
 画面可配置 3～12 顶点的床位多边形。当前仅启用坐起提醒，床沿与地面区域只保存备用。

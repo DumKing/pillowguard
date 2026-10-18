@@ -1,8 +1,8 @@
 // Local mock routes only; never uses live credentials or camera.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),http=require('node:http'),assert=require('node:assert/strict'),{spawn}=require('node:child_process');
-const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'laoren-care-'));let child,receiver;const messages=[];let failSpeaker=false;const wait=ms=>new Promise(r=>setTimeout(r,ms));
+const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'zhenan-care-'));let child,receiver;const messages=[];let failSpeaker=false;const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(name,data){const r=await fetch('http://127.0.0.1:8765/api/'+name,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok)throw Error(name+':'+r.status);return r.json()}
-async function boot(){child=spawn(path.join(root,'bin/laoren-server'),[],{cwd:root,env:{...process.env,LAOREN_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await wait(100);if(child.exitCode!==null)throw Error('close the desktop app first');try{return await api('state')}catch{}}throw Error('server did not start')}
+async function boot(){child=spawn(path.join(root,'bin/zhenan-server'),[],{cwd:root,env:{...process.env,ZHENAN_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await wait(100);if(child.exitCode!==null)throw Error('close the desktop app first');try{return await api('state')}catch{}}throw Error('server did not start')}
 async function stop(){if(!child)return;const c=child;child=null;await new Promise(r=>{c.once('exit',r);c.kill('SIGTERM')})}
 async function until(fn,limit=8000){for(let n=0;n<limit/100;n++){if(await fn())return;await wait(100)}throw Error('timed out')}
 (async()=>{try{
