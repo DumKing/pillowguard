@@ -1,0 +1,27 @@
+# Local runtime data and credentials
+/data/
+/work/
+.env
+.env.*
+!.env.example
+**/credentials.json
+**/config.json
+*.pem
+*.key
+*.p12
+*.pfx
+# Build outputs and downloaded runtime assets
+/target/
+/bin/
+/models/
+/dist/
+/gen/
+# Historical local prototype and tool caches
+/legacy-python/
+.venv/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+
+/icons/

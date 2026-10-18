@@ -1,0 +1,27 @@
+// Run with the app stopped: node tests/channels-smoke.cjs . Uses only temporary dummy credentials.
+const {spawn}=require('node:child_process'),fs=require('node:fs'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
+const root=path.resolve(process.argv[2]||'.');
+const dir=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'laoren-channels-'));let child,receiver;const requests=[];
+const pause=ms=>new Promise(r=>setTimeout(r,ms));
+async function api(name,data){const res=await fetch('http://127.0.0.1:8765/api/'+name,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});assert(res.ok,name+': '+res.status);return res.json()}
+async function boot(){child=spawn(path.join(root,'bin/laoren-server'),[],{cwd:root,env:{...process.env,LAOREN_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await pause(100);if(child.exitCode!==null)throw Error('test server exited; stop the existing app first');try{return await api('state')}catch{}}throw Error('test server did not start')}
+async function stop(){if(!child)return;const c=child;child=null;await new Promise(r=>{c.once('exit',r);c.kill('SIGTERM')})}
+async function settled(){for(let n=0;n<40;n++){const s=await api('state');if(s.alert!=='正在发送所选渠道…'&&requests.length)return;await pause(75)}throw Error('notification did not finish')}
+(async()=>{try{
+receiver=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{requests.push({url:req.url,headers:req.headers,body:JSON.parse(body)});res.end('{}')})});await new Promise(r=>receiver.listen(0,'127.0.0.1',r));const url='http://127.0.0.1:'+receiver.address().port;
+fs.writeFileSync(path.join(dir,'config.json'),JSON.stringify({channels:['webhook']}));fs.writeFileSync(path.join(dir,'credentials.json'),JSON.stringify({token:'dummy-ha-token',webhook:url+'/legacy?key=dummy'}));
+let state=await boot();assert.equal(state.push_channels.length,1);assert.equal(state.push_channels[0].kind,'webhook');assert.equal((await api('channel/reveal',{id:state.push_channels[0].id,field:'url'})).value,url+'/legacy?key=dummy');
+const channels=['a','b','c'].map((id,n)=>({id,name:'测试群'+id,kind:'webhook',enabled:n<2,url:url+'/'+id+'?key=dummy',secret:id==='a'?'dummy-signing-secret':''}));
+await api('config',{push_channels:channels});state=await api('state');assert(!JSON.stringify(state).includes('dummy-signing-secret'));assert(!JSON.stringify(state).includes('?key=dummy'));
+await stop();state=await boot();assert.equal(state.push_channels.length,3);assert.equal((await api('channel/reveal',{id:'a',field:'secret'})).value,'dummy-signing-secret');
+await api('config',{push_channels:state.push_channels});assert.equal((await api('channel/reveal',{id:'a',field:'url'})).value,channels[0].url);
+await api('test-alert',{});await pause(150);await settled();assert.deepEqual(requests.map(r=>r.url.split('?')[0]).sort(),['/a','/b']);assert(requests.every(r=>!r.headers.authorization));
+requests.length=0;await api('test-channel',{id:'c'});await pause(150);await settled();assert.deepEqual(requests.map(r=>r.url.split('?')[0]),['/c']);
+state=await api('state');let edited=state.push_channels.filter(c=>c.id!=='b').map(c=>c.id==='a'?{...c,clear_url:true,clear_secret:true}:c);await api('config',{push_channels:edited});await stop();state=await boot();assert.equal(state.push_channels.length,2);assert.equal((await api('channel/reveal',{id:'a',field:'url'})).value,'');assert.equal((await api('channel/reveal',{id:'a',field:'secret'})).value,'');assert.equal((await api('channel/reveal',{id:'c',field:'url'})).value,channels[2].url);
+await api('token/clear',{});assert.equal((await api('state')).push_channels.length,2);
+await api('config',{push_channels:[]});await stop();state=await boot();assert.equal(state.push_channels.length,0);
+const appChannel={id:'enterprise',name:'应用照护通知',kind:'wecom_app',enabled:false,corp_id:'wwdummy',agent_id:'1001',secret:'dummy-app-private-secret',touser:'alice|bob',toparty:'2',totag:'3'};
+await api('config',{push_channels:[appChannel]});state=await api('state');assert(!JSON.stringify(state).includes('dummy-app-private-secret'));assert.equal(state.push_channels[0].corp_id,'wwdummy');await api('config',{push_channels:state.push_channels});await stop();state=await boot();assert.equal(state.push_channels[0].agent_id,'1001');assert.equal(state.push_channels[0].touser,'alice|bob');assert.equal(state.push_channels[0].toparty,'2');assert.equal(state.push_channels[0].totag,'3');assert.equal((await api('channel/reveal',{id:'enterprise',field:'secret'})).value,appChannel.secret);
+await api('config',{push_channels:state.push_channels.map(c=>({...c,clear_secret:true,enabled:true}))});await api('test-channel',{id:'enterprise'});for(let n=0;n<30;n++){await pause(100);state=await api('state');if(state.alert.includes('配置不完整'))break}assert(state.alert.includes('配置不完整'));assert.equal((await api('channel/reveal',{id:'enterprise',field:'secret'})).value,'');assert(!JSON.stringify(state.events).includes('dummy-app-private-secret'));
+console.log('PASS: enterprise app persistence, private secret reveal/clear, incomplete-configuration failure;  migration, multiple same-type destinations, enabled fan-out, single-channel test, private state, reveal, blank retention, restart, clear, delete, and token/channel independence');
+}finally{await stop();if(receiver)await new Promise(r=>receiver.close(r));fs.rmSync(dir,{recursive:true,force:true})}})().catch(e=>{console.error(e);process.exitCode=1});

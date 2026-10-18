@@ -1,0 +1,12 @@
+services:
+  laoren:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      LAOREN_PASSWORD: ${LAOREN_PASSWORD:?请设置至少12字符的管理密码}
+    volumes:
+      - laoren-data:/app/data
+volumes:
+  laoren-data:

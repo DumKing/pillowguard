@@ -1,0 +1,9 @@
+target
+.venv
+legacy-python
+data
+work
+dist
+bin
+models
+.git

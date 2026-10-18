@@ -1,0 +1,32 @@
+{
+  "productName": "枕安",
+  "version": "0.3.0",
+  "identifier": "com.laoren.shouwang",
+  "build": {
+    "frontendDist": "web"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "infoPlist": "Info.plist"
+    },
+    "resources": [
+      "models/yolov8n-pose.onnx",
+      "bin/ffmpeg"
+    ],
+    "icon": [
+      "assets/pillowguard-icon-32.png",
+      "assets/pillowguard-icon-256.png",
+      "assets/PillowGuard.icns",
+      "assets/PillowGuard.ico"
+    ]
+  }
+}
