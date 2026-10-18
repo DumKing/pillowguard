@@ -1,9 +1,9 @@
 // Temporary dummy data and a local receiver only. Desktop app must be closed.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),http=require('node:http'),assert=require('node:assert/strict'),{spawn}=require('node:child_process');
-const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'zhenan-unknown-'));let child,receiver;const messages=[];
+const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'pillowguard-unknown-'));let child,receiver;const messages=[];
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(name,data){const r=await fetch('http://127.0.0.1:8765/api/'+name,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});assert(r.ok,name+':'+r.status);return r.json()}
-async function boot(){child=spawn(path.join(root,'bin/zhenan-server'),[],{cwd:root,env:{...process.env,ZHENAN_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await pause(100);if(child.exitCode!==null)throw Error('stop the desktop app before testing');try{return await api('state')}catch{}}throw Error('server not ready')}
+async function boot(){child=spawn(path.join(root,'bin/pillowguard-server'),[],{cwd:root,env:{...process.env,PILLOWGUARD_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await pause(100);if(child.exitCode!==null)throw Error('stop the desktop app before testing');try{return await api('state')}catch{}}throw Error('server not ready')}
 async function stop(){if(!child)return;const c=child;child=null;await new Promise(r=>{c.once('exit',r);c.kill('SIGTERM')})}
 async function transition(){await api('demo',{pose:'unknown',select:true});await pause(2400);await api('demo',{pose:'upright',select:true});await pause(1200)}
 (async()=>{try{

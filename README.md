@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/zhenan-icon-256.png" width="128" alt="枕安图标">
+  <img src="assets/pillowguard-icon-256.png" width="128" alt="枕安图标">
 </p>
 
-<h1 align="center">枕安</h1>
+<h1 align="center">枕安 · PillowGuard</h1>
 <p align="center">本地识别老人坐起，让床旁守护及时一点。</p>
 
 枕安是一款用 Rust 开发的床旁姿态监测与通知软件。通过本机或网络摄像头识别床位内的持续坐起，按规则向小爱音箱、Home Assistant、企业微信、钉钉和自定义 Webhook 发送提醒。
@@ -107,15 +107,17 @@ CI 的编译结果不代表对应设备的摄像头或长期值守已经验收�
 |---|---|
 | macOS 桌面 | `~/Library/Application Support/枕安` |
 | Windows 桌面 | `%LOCALAPPDATA%\枕安` |
-| Linux 桌面 | `~/.local/share/zhenan` |
-| 无桌面服务 | 资源目录下的 `data/`，或 `ZHENAN_DATA_DIR` 指定位置 |
+| Linux 桌面 | `~/.local/share/pillowguard` |
+| 无桌面服务 | 资源目录下的 `data/`，或 `PILLOWGUARD_DATA_DIR` 指定位置 |
 | Docker Compose | `laoren-data` 持久数据卷（沿用已有卷） |
 
-软件名称统一为「枕安」，命令行程序名为 `zhenan`，新环境变量采用 `ZHENAN_*`。桌面版首次升级会将旧数据目录整体迁移到上表目录，保留配置、凭据、历史及告警画面；新目录已存在时不覆盖，迁移失败时继续读取旧目录。旧版 `LAOREN_*` 环境变量和 `shouwang-rules` 规则备份仍可读取，新设置使用新名称。为延续系统授权，应用内部标识 `com.laoren.shouwang` 保持不变；Docker 沿用原有数据卷 `laoren-data`，避免升级后配置丢失。GitHub 仓库地址和本地开发目录保持原路径。
+中文名称为「枕安」，英文名称为 **PillowGuard**。命令行程序名为 `pillowguard`，新环境变量采用 `PILLOWGUARD_*`。桌面版首次升级会将旧数据目录整体迁移到上表目录，保留配置、凭据、历史及告警画面；新目录已存在时不覆盖，迁移失败时继续读取旧目录。旧版 `LAOREN_*`、过渡版 `ZHENAN_*` 环境变量及旧规则备份仍可读取，新设置使用新名称。为延续系统授权，应用内部标识 `com.laoren.shouwang` 保持不变；Docker 沿用原有数据卷 `laoren-data`，避免升级后配置丢失。GitHub 仓库地址和本地开发目录保持原路径。
 
 令牌、Webhook、应用 Secret、摄像头地址单独保存在 `credentials.json`，**本地未加密**；macOS / Linux 按 0600 权限保存。普通状态轮询与规则备份不返回这些凭据。卸载应用不会自动删除数据目录。
 
 服务默认只允许本机访问 `http://127.0.0.1:8765`，同一端口只运行一个实例。NAS 通过管理密码访问；不要直接把未保护的 8765 端口暴露到公网。
+
+命名约定见 [枕安 / PillowGuard 命名规范](docs/命名规范.md)。
 
 ## 从源码构建
 
@@ -130,10 +132,10 @@ cargo build --release --locked
 
 模型下载脚本会检查 SHA-256，不覆盖校验不匹配的已有模型。Windows 可在 Git Bash 中执行脚本。
 
-将相应平台的 FFmpeg 放到 `bin/ffmpeg`（Windows 为 `bin/ffmpeg.exe`），或通过 `ZHENAN_FFMPEG` 指定其绝对路径。运行无桌面服务：
+将相应平台的 FFmpeg 放到 `bin/ffmpeg`（Windows 为 `bin/ffmpeg.exe`），或通过 `PILLOWGUARD_FFMPEG` 指定其绝对路径。运行无桌面服务：
 
 ```bash
-export ZHENAN_FFMPEG="/absolute/path/to/ffmpeg"
+export PILLOWGUARD_FFMPEG="/absolute/path/to/ffmpeg"
 cargo run --release --locked
 ```
 
@@ -158,13 +160,13 @@ cargo build --release --features desktop --locked
 powershell -File tools/package-windows.ps1 -FfmpegPath C:\path\to\ffmpeg.exe
 ```
 
-输出 `dist/枕安-Windows.zip`。解压完整文件夹后打开 `枕安.exe`，保留 `bin` 和 `models`，尚需 Windows 实机验证。
+输出 `dist/PillowGuard-Windows.zip`。解压完整文件夹后打开 `PillowGuard.exe`，保留 `bin` 和 `models`，尚需 Windows 实机验证。
 
 ### Linux / NAS
 
 ```bash
 cp .env.example .env
-# 编辑 .env，为 ZHENAN_PASSWORD 设置至少 12 字符的管理密码
+# 编辑 .env，为 PILLOWGUARD_PASSWORD 设置至少 12 字符的管理密码
 # 首次构建需要访问容器镜像源、Rust 依赖源和模型下载源
 docker compose up -d --build
 ```
@@ -175,11 +177,11 @@ docker compose up -d --build
 
 | 变量 | 用途 |
 |---|---|
-| `ZHENAN_HOME` | 资源目录，包含 `models/` 与 `bin/` |
-| `ZHENAN_DATA_DIR` | 配置、凭据、历史及告警记录目录 |
-| `ZHENAN_FFMPEG` | FFmpeg 可执行文件路径 |
-| `ZHENAN_BIND` | 服务监听地址，默认 `127.0.0.1` |
-| `ZHENAN_PASSWORD` | 服务访问密码，NAS 非本机访问时使用 |
+| `PILLOWGUARD_HOME` | 资源目录，包含 `models/` 与 `bin/` |
+| `PILLOWGUARD_DATA_DIR` | 配置、凭据、历史及告警记录目录 |
+| `PILLOWGUARD_FFMPEG` | FFmpeg 可执行文件路径 |
+| `PILLOWGUARD_BIND` | 服务监听地址，默认 `127.0.0.1` |
+| `PILLOWGUARD_PASSWORD` | 服务访问密码，NAS 非本机访问时使用 |
 | `ORT_LIB_LOCATION` | 构建时 ONNX Runtime 安装目录 |
 | `CARGO_TARGET_DIR` | Cargo 构建产物目录，打包脚本也读取该值 |
 
@@ -228,7 +230,7 @@ node tests/alert-capture-ui.cjs
 ```bash
 cargo build --locked
 mkdir -p bin
-cp target/debug/zhenan bin/zhenan-server
+cp target/debug/pillowguard bin/pillowguard-server
 node tests/channels-smoke.cjs
 node tests/schedule-smoke.cjs
 node tests/regions-smoke.cjs

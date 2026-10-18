@@ -2118,7 +2118,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
         saved.dingtalk_secret.clear();
         credentials::save_all(&data, &saved)?;
     }
-    ort::init().with_name("zhenan").commit()?;
+    ort::init().with_name("pillowguard").commit()?;
     let password = brand::env("PASSWORD")
         .and_then(|v| v.into_string().ok())
         .filter(|s| s.len() >= 12);
@@ -2126,7 +2126,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
         .and_then(|v| v.into_string().ok())
         .unwrap_or("127.0.0.1".into());
     if bind != "127.0.0.1" && password.is_none() {
-        bail!("局域网访问须设置至少 12 字符的 ZHENAN_PASSWORD");
+        bail!("局域网访问须设置至少 12 字符的 PILLOWGUARD_PASSWORD");
     }
     let history_file = data.join("history.json");
     let (events, history_path, history_status) = match history::load(&history_file) {
@@ -2217,7 +2217,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "image/png")],
-                    &include_bytes!("../assets/zhenan-icon-256.png")[..],
+                    &include_bytes!("../assets/pillowguard-icon-256.png")[..],
                 )
             }),
         )
@@ -2297,7 +2297,14 @@ fn data_dir(root: &Path) -> PathBuf {
                 "枕安",
             )
         } else {
-            brand::desktop_data(&home.join(".local/share"), "shouwang", "zhenan")
+            {
+                let parent = home.join(".local/share");
+                if !parent.join("pillowguard").exists() && parent.join("zhenan").is_dir() {
+                    brand::desktop_data(&parent, "zhenan", "pillowguard")
+                } else {
+                    brand::desktop_data(&parent, "shouwang", "pillowguard")
+                }
+            }
         };
     }
     root.join("data")
@@ -2305,7 +2312,7 @@ fn data_dir(root: &Path) -> PathBuf {
 fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--self-test" || a == "--head-self-test") {
         let root = root();
-        ort::init().with_name("zhenan-test").commit()?;
+        ort::init().with_name("pillowguard-test").commit()?;
         let mut detector = vision::Detector::new(&root.join("models/yolov8n-pose.onnx"))?;
         let image = std::env::args()
             .skip_while(|a| a != "--self-test" && a != "--head-self-test")

@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 PROFILE=${1:-release}
 ARCH=$(uname -m)
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
-STAGE=$(mktemp -d "${TMPDIR:-/private/tmp}/zhenan-installer.XXXXXX")
+STAGE=$(mktemp -d "${TMPDIR:-/private/tmp}/pillowguard-installer.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 bash tools/package-macos.sh "$PROFILE" "$STAGE/枕安.app"
 ln -s /Applications "$STAGE/Applications"

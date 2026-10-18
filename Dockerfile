@@ -17,11 +17,11 @@ RUN mkdir -p bin models data && \
     tar -xzOf /tmp/heads.tar.gz yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320.onnx > models/head-detector.onnx && \
     echo 'f995ac5315917f54654b4ca47f9e574be7bdb636775f289fb8b82c25be040233  models/head-detector.onnx' | sha256sum -c - && \
     rm /tmp/heads.tar.gz && \
-    useradd -u 10001 -M zhenan && chown -R 10001:10001 /app/data
-COPY --from=build /src/target/release/zhenan /app/zhenan
+    useradd -u 10001 -M pillowguard && chown -R 10001:10001 /app/data
+COPY --from=build /src/target/release/pillowguard /app/pillowguard
 COPY assets/HeadDetector-LICENSE.txt /app/HeadDetector-LICENSE.txt
-ENV ZHENAN_HOME=/app ZHENAN_DATA_DIR=/app/data ZHENAN_FFMPEG=/usr/bin/ffmpeg ZHENAN_BIND=0.0.0.0
+ENV PILLOWGUARD_HOME=/app PILLOWGUARD_DATA_DIR=/app/data PILLOWGUARD_FFMPEG=/usr/bin/ffmpeg PILLOWGUARD_BIND=0.0.0.0
 USER 10001
 EXPOSE 8765
 VOLUME ["/app/data"]
-CMD ["/app/zhenan"]
+CMD ["/app/pillowguard"]

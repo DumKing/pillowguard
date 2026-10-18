@@ -1,9 +1,9 @@
 // Stops only its own temporary server. Run while the desktop app is closed.
 const {spawn}=require('node:child_process'),fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'zhenan-features-'));let child;
+const root=path.resolve(process.argv[2]||'.'),dir=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'pillowguard-features-'));let child;
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(endpoint,body){const r=await fetch('http://127.0.0.1:8765/api/'+endpoint,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});assert(r.ok,endpoint+':'+r.status);return r.json()}
-async function boot(){child=spawn(path.join(root,'bin/zhenan-server'),[],{cwd:root,env:{...process.env,ZHENAN_DATA_DIR:dir},stdio:'ignore'});for(let i=0;i<60;i++){await pause(100);if(child.exitCode!==null)throw Error('stop desktop app before test');try{return await api('state')}catch{}}throw Error('server start failed')}
+async function boot(){child=spawn(path.join(root,'bin/pillowguard-server'),[],{cwd:root,env:{...process.env,PILLOWGUARD_DATA_DIR:dir},stdio:'ignore'});for(let i=0;i<60;i++){await pause(100);if(child.exitCode!==null)throw Error('stop desktop app before test');try{return await api('state')}catch{}}throw Error('server start failed')}
 async function stop(){if(!child)return;const c=child;child=null;await new Promise(r=>{c.once('exit',r);c.kill('SIGTERM')})}
 (async()=>{try{
 await boot();await api('config',{push_channels:[],source_mode:'demo',person_confidence:0.55,multiple_confidence:0.8});await api('start',{mode:'demo'});await api('demo',{pose:'lying',select:true});await pause(2300);assert((await api('state')).armed);await api('demo',{pose:'multiple',select:true});assert.equal((await api('state')).pose,'multiple');assert(!(await api('state')).armed);await api('demo',{pose:'upright',select:true});await pause(700);assert(!(await api('state')).armed);await api('stop',{});

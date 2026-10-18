@@ -1,10 +1,10 @@
 // Run with the app stopped: node tests/channels-smoke.cjs . Uses only temporary dummy credentials.
 const {spawn}=require('node:child_process'),fs=require('node:fs'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
 const root=path.resolve(process.argv[2]||'.');
-const dir=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'zhenan-channels-'));let child,receiver;const requests=[];
+const dir=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'pillowguard-channels-'));let child,receiver;const requests=[];
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(name,data){const res=await fetch('http://127.0.0.1:8765/api/'+name,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});assert(res.ok,name+': '+res.status);return res.json()}
-async function boot(){child=spawn(path.join(root,'bin/zhenan-server'),[],{cwd:root,env:{...process.env,ZHENAN_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await pause(100);if(child.exitCode!==null)throw Error('test server exited; stop the existing app first');try{return await api('state')}catch{}}throw Error('test server did not start')}
+async function boot(){child=spawn(path.join(root,'bin/pillowguard-server'),[],{cwd:root,env:{...process.env,PILLOWGUARD_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await pause(100);if(child.exitCode!==null)throw Error('test server exited; stop the existing app first');try{return await api('state')}catch{}}throw Error('test server did not start')}
 async function stop(){if(!child)return;const c=child;child=null;await new Promise(r=>{c.once('exit',r);c.kill('SIGTERM')})}
 async function settled(){for(let n=0;n<40;n++){const s=await api('state');if(s.alert!=='正在发送所选渠道…'&&requests.length)return;await pause(75)}throw Error('notification did not finish')}
 (async()=>{try{

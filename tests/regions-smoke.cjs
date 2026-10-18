@@ -1,9 +1,9 @@
 // Temporary local data only: compatibility, polygon persistence, invalid shapes,
 // calibration invalidation and inactive auxiliary regions.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),assert=require('node:assert/strict'),{spawn}=require('node:child_process');
-const root=path.resolve('.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'zhenan-regions-'));let child;const wait=ms=>new Promise(r=>setTimeout(r,ms));
+const root=path.resolve('.'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'pillowguard-regions-'));let child;const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function api(name,data){const r=await fetch('http://127.0.0.1:8765/api/'+name,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok)throw Error(name+':'+r.status);return r.json()}
-async function boot(){child=spawn(path.join(root,'bin/zhenan-server'),[],{cwd:root,env:{...process.env,ZHENAN_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await wait(100);if(child.exitCode!==null)throw Error('stop the desktop app first');try{return await api('state')}catch{}}throw Error('server did not start')}
+async function boot(){child=spawn(path.join(root,'bin/pillowguard-server'),[],{cwd:root,env:{...process.env,PILLOWGUARD_DATA_DIR:dir},stdio:'ignore'});for(let n=0;n<60;n++){await wait(100);if(child.exitCode!==null)throw Error('stop the desktop app first');try{return await api('state')}catch{}}throw Error('server did not start')}
 async function stop(){if(!child)return;const c=child;child=null;await new Promise(r=>{c.once('exit',r);c.kill('SIGTERM')})}
 function close(a,b){assert.equal(a.length,b.length);for(let k=0;k<a.length;k++)for(let j=0;j<2;j++)assert(Math.abs(a[k][j]-b[k][j])<1e-6)}
 (async()=>{try{

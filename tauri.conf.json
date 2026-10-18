@@ -25,10 +25,10 @@
       "bin/ffmpeg"
     ],
     "icon": [
-      "assets/zhenan-icon-32.png",
-      "assets/zhenan-icon-256.png",
-      "assets/zhenan.icns",
-      "assets/zhenan.ico"
+      "assets/pillowguard-icon-32.png",
+      "assets/pillowguard-icon-256.png",
+      "assets/PillowGuard.icns",
+      "assets/PillowGuard.ico"
     ]
   }
 }

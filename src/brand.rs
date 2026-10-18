@@ -5,7 +5,8 @@ use std::{
 };
 
 pub fn env(name: &str) -> Option<OsString> {
-    std::env::var_os(format!("ZHENAN_{name}"))
+    std::env::var_os(format!("PILLOWGUARD_{name}"))
+        .or_else(|| std::env::var_os(format!("ZHENAN_{name}")))
         .or_else(|| std::env::var_os(format!("LAOREN_{name}")))
 }
 
@@ -30,20 +31,26 @@ mod tests {
     #[test]
     fn new_environment_names_take_precedence_with_legacy_fallback() {
         let suffix = format!("BRAND_TEST_{}", std::process::id());
-        let new = format!("ZHENAN_{suffix}");
+        let new = format!("PILLOWGUARD_{suffix}");
         let old = format!("LAOREN_{suffix}");
+        let transitional = format!("ZHENAN_{suffix}");
         assert!(env(&suffix).is_none());
         std::env::set_var(&old, "legacy");
         assert_eq!(env(&suffix), Some("legacy".into()));
+        std::env::set_var(&transitional, "transitional");
+        assert_eq!(env(&suffix), Some("transitional".into()));
         std::env::set_var(&new, "current");
         assert_eq!(env(&suffix), Some("current".into()));
         std::env::remove_var(new);
+        assert_eq!(env(&suffix), Some("transitional".into()));
+        std::env::remove_var(transitional);
+        assert_eq!(env(&suffix), Some("legacy".into()));
         std::env::remove_var(old);
     }
     #[test]
     fn migrate_complete_data_without_overwriting_newer_settings() {
         let parent = std::env::temp_dir().join(format!(
-            "zhenan-migration-{}-{}",
+            "pillowguard-migration-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

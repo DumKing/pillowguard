@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DMG=${1:?请指定 DMG 文件}
-ATTACH=$(mktemp "${TMPDIR:-/private/tmp}/zhenan-mount.XXXXXX")
+ATTACH=$(mktemp "${TMPDIR:-/private/tmp}/pillowguard-mount.XXXXXX")
 MOUNT=""
 cleanup() {
   if [ -n "$MOUNT" ]; then hdiutil detach "$MOUNT" >/dev/null; fi
@@ -23,20 +23,20 @@ test -f "$MOUNT/安装说明.txt"
 test -f "$APP/Contents/Resources/models/yolov8n-pose.onnx"
 codesign --verify --deep --strict "$APP"
 # Run from the image, so self-test must find bundled resources without checkout.
-(cd "$MOUNT" && env -u ZHENAN_HOME -u LAOREN_HOME "$APP/Contents/MacOS/zhenan" --self-test)
+(cd "$MOUNT" && env -u PILLOWGUARD_HOME -u ZHENAN_HOME -u LAOREN_HOME "$APP/Contents/MacOS/pillowguard" --self-test)
 "$APP/Contents/Resources/bin/ffmpeg" -version > /dev/null
 python3 - "$APP" <<'PY'
 from pathlib import Path
 import sys,plistlib
 app=Path(sys.argv[1])
 files={str(p.relative_to(app)) for p in app.rglob('*') if p.is_file()}
-expected={'Contents/Resources/zhenan.icns','Contents/Info.plist','Contents/MacOS/zhenan','Contents/Resources/bin/ffmpeg','Contents/Resources/models/yolov8n-pose.onnx','Contents/Resources/models/head-detector.onnx','Contents/Resources/HeadDetector-LICENSE.txt','Contents/Resources/FFmpeg-许可说明.txt','Contents/_CodeSignature/CodeResources'}
+expected={'Contents/Resources/PillowGuard.icns','Contents/Info.plist','Contents/MacOS/pillowguard','Contents/Resources/bin/ffmpeg','Contents/Resources/models/yolov8n-pose.onnx','Contents/Resources/models/head-detector.onnx','Contents/Resources/HeadDetector-LICENSE.txt','Contents/Resources/FFmpeg-许可说明.txt','Contents/_CodeSignature/CodeResources'}
 with (app/'Contents/Info.plist').open('rb') as f: info=plistlib.load(f)
 assert info['CFBundleName']=='枕安'
 assert info['CFBundleDisplayName']=='枕安'
-assert info['CFBundleExecutable']=='zhenan'
-assert info['CFBundleIconFile']=='zhenan.icns'
-assert (app/'Contents/Resources/zhenan.icns').read_bytes()[:4]==b'icns'
+assert info['CFBundleExecutable']=='pillowguard'
+assert info['CFBundleIconFile']=='PillowGuard.icns'
+assert (app/'Contents/Resources/PillowGuard.icns').read_bytes()[:4]==b'icns'
 assert files==expected, f'Unexpected bundle files: {files ^ expected}'
 print('PASS：安装镜像、应用签名、内置推理模型、视频组件和纯程序文件检查通过')
 PY

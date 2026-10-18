@@ -7,12 +7,12 @@
 概念：绿色代表安定；床位明确软件用途；屋檐表达守护；月亮表达夜间值守。图标无文字，兼顾小尺寸识别。
 
 文件：
-- `zhenan-icon-v1.png`：1254 × 1254 透明背景原图。
-- `zhenan-icon-1024.png`：标准 1024 × 1024 图标。
-- `zhenan-icon-256.png`：网页品牌与 favicon。
-- `zhenan-icon-32.png`：小尺寸图标。
-- `zhenan.icns`：Mac 多尺寸应用图标。
-- `zhenan.ico`：Windows 图标（256 像素 PNG 封装）。
+- `pillowguard-icon-v1.png`：1254 × 1254 透明背景原图。
+- `pillowguard-icon-1024.png`：标准 1024 × 1024 图标。
+- `pillowguard-icon-256.png`：网页品牌与 favicon。
+- `pillowguard-icon-32.png`：小尺寸图标。
+- `PillowGuard.icns`：Mac 多尺寸应用图标。
+- `PillowGuard.ico`：Windows 图标（256 像素 PNG 封装）。
 
 最终生成提示词：
 

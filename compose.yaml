@@ -1,11 +1,11 @@
 services:
-  zhenan:
+  pillowguard:
     build: .
     restart: unless-stopped
     ports:
       - "8765:8765"
     environment:
-      ZHENAN_PASSWORD: ${ZHENAN_PASSWORD:-${LAOREN_PASSWORD:?请设置至少12字符的管理密码}}
+      PILLOWGUARD_PASSWORD: ${PILLOWGUARD_PASSWORD:-${ZHENAN_PASSWORD:-${LAOREN_PASSWORD:?请设置至少12字符的管理密码}}}
     volumes:
       - laoren-data:/app/data
 volumes:
