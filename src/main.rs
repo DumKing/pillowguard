@@ -58,6 +58,7 @@ struct Config {
     hold: f64,
     analysis_fps: u8,
     realtime_preview: bool,
+    capture_window_frames: usize,
     cooldown: f64,
     threshold: f32,
     person_confidence: f32,
@@ -89,6 +90,7 @@ impl Default for Config {
             hold: 2.,
             analysis_fps: 4,
             realtime_preview: false,
+            capture_window_frames: 5,
             cooldown: 60.,
             threshold: 0.65,
             person_confidence: 0.5,
@@ -102,6 +104,9 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
+        if !(1..=captures::MAX_FRAMES).contains(&self.capture_window_frames) {
+            bail!("告警留存窗口应为 1 至 20 帧");
+        }
         if !(1..=4).contains(&self.analysis_fps) {
             bail!("识别频率应为每秒 1 至 4 帧");
         }
@@ -266,6 +271,7 @@ impl Default for View {
     }
 }
 struct Inner {
+    recent_frames: captures::Recent,
     frame_evidence: Option<serde_json::Value>,
     captures: captures::Store,
     care_book: care::Book,
@@ -544,7 +550,10 @@ fn trigger_care(app: &App, kind: care::Kind, reason: Option<&str>, generation: u
         if let Some(prefix) = reason {
             text = format!("{}：{}", prefix, text)
         }
-        let now = Utc::now().timestamp_millis() as f64 / 1000.;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
         if i.care_book.alerts.iter().any(|a| {
             a.kind == kind
                 && a.demo == demo
@@ -556,20 +565,13 @@ fn trigger_care(app: &App, kind: care::Kind, reason: Option<&str>, generation: u
         let id = i.care_book.create(kind, text.clone(), now, demo);
         persist_care(&i);
         let fresh = !demo && i.view.last_frame.is_some_and(|t| now >= t && now - t <= 2.);
-        let image = if fresh { i.frame.clone() } else { vec![] };
-        let evidence = if fresh {
-            i.frame_evidence.clone()
+        let frames = if fresh {
+            i.recent_frames.snapshot(now)
         } else {
-            None
+            vec![]
         };
-        i.captures.record(
-            id.clone(),
-            clock,
-            kind.label().into(),
-            demo,
-            &image,
-            evidence,
-        );
+        i.captures
+            .record(id.clone(), clock, kind.label().into(), demo, frames);
         App::event(
             &mut i,
             format!(
@@ -726,6 +728,22 @@ async fn alert_capture(
         )
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+async fn alert_capture_frame(
+    State(app): State<App>,
+    axum::extract::Path((id, index)): axum::extract::Path<(String, usize)>,
+) -> Response {
+    match app.inner.lock().unwrap().captures.frame_image(&id, index) {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => ([(header::CACHE_CONTROL, "no-store")], StatusCode::NOT_FOUND).into_response(),
     }
 }
 async fn frame(State(app): State<App>) -> Response {
@@ -932,6 +950,12 @@ async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
         i.push_channels = saved.push_channels.unwrap_or_default();
         if i.config.rest_head_region != c.rest_head_region {
             i.view.suspected_lying = false;
+        }
+        if rule_changed
+            || c.capture_window_frames != i.config.capture_window_frames
+            || c.analysis_fps != i.config.analysis_fps
+        {
+            i.recent_frames.clear();
         }
         i.config = c;
         i.token = saved.token;
@@ -1635,6 +1659,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 i.view.last_frame = None;
                 i.view.suspected_lying = false;
                 i.view.message = "时段外，等待监测时间".into();
+                i.recent_frames.clear();
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -1783,6 +1808,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     let mut i = app.inner.lock().unwrap();
                     i.view.last_frame = None;
                     i.view.suspected_lying = false;
+                    i.recent_frames.clear();
                     if i.view.message != "视频流中断，5 秒后重新连接" {
                         App::event(&mut i, "摄像头断流，当前无法判断姿态");
                         App::event(
@@ -1917,6 +1943,13 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     "multiple_confidence":c.multiple_confidence,
                     "bed":c.bed,"rest_head_region":c.rest_head_region
                 }));
+                let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+                if !replay {
+                    let sample =
+                        captures::Frame::new(timestamp, &i.frame, i.frame_evidence.clone());
+                    i.recent_frames
+                        .push(timestamp, sample, c.capture_window_frames);
+                }
                 i.view.last_frame =
                     Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
             }
@@ -2094,6 +2127,7 @@ async fn action(
                 i.samples.clear();
                 i.view.assisted = false;
                 i.frame.clear();
+                i.recent_frames.clear();
                 i.preview.clear();
                 i.view.last_preview = None;
                 i.view.running = true;
@@ -2188,6 +2222,7 @@ async fn action(
                 i.view.last_frame = None;
                 i.view.suspected_lying = false;
                 i.view.message = "已停止".into();
+                i.recent_frames.clear();
                 i.preview.clear();
                 i.view.last_preview = None;
             }
@@ -2325,6 +2360,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
     };
     let app = App {
         inner: Arc::new(Mutex::new(Inner {
+            recent_frames: captures::Recent::default(),
             frame_evidence: None,
             captures: captures::Store::load(data.join("alert-captures.json")),
             care_book,
@@ -2411,6 +2447,10 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
         .route("/frame.jpg", get(frame))
         .route("/preview.jpg", get(preview))
         .route("/api/alert-capture/{id}", get(alert_capture))
+        .route(
+            "/api/alert-capture/{id}/frame/{index}",
+            get(alert_capture_frame),
+        )
         .route("/api/config", post(save))
         .route("/api/token/{action}", post(token_action))
         .route("/api/{action}", post(action))
@@ -2659,6 +2699,15 @@ mod tests {
         let legacy: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.analysis_fps, 4);
         assert!(!legacy.realtime_preview);
+        assert_eq!(legacy.capture_window_frames, 5);
+        for count in [0, 21] {
+            assert!(Config {
+                capture_window_frames: count,
+                ..Config::default()
+            }
+            .validate()
+            .is_err());
+        }
 
         let dir = std::env::temp_dir().join(format!(
             "pillowguard-fps-{}-{}",
