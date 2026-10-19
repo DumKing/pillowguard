@@ -9,7 +9,7 @@
 
 视频在运行设备上分析，默认不上传视频，也不保存录像。桌面版使用 Tauri；运行安装包不需要 Python 或 Rust 环境。
 
-**当前版本：0.3.9。仅启用坐起提醒。** 当前姿态模型不能保证区分坐姿与站姿；床沿、地面区域只保存备用，不触发离床、站起或跌倒告警。识别受光线、机位和遮挡影响，仍需结合实际照护。
+**当前版本：0.3.10。仅启用坐起提醒。** 当前姿态模型不能保证区分坐姿与站姿；床沿、地面区域只保存备用，不触发离床、站起或跌倒告警。识别受光线、机位和遮挡影响，仍需结合实际照护。
 
 ## 功能
 
@@ -44,7 +44,7 @@ CI 的编译结果不代表对应设备的摄像头或长期值守已经验收�
 
 ### 已有 Mac 安装包
 
-1. 打开 `枕安-0.3.9-Mac-x86_64.dmg`，把「枕安.app」拖入 Applications。
+1. 打开 `枕安-0.3.10-Mac-x86_64.dmg`，把「枕安.app」拖入 Applications。
 2. 从「应用程序」启动，按系统提示允许摄像头和本地网络访问。
 3. 选择视频来源，绘制绿色床位区域，保存后开始监测。
 4. 在「通知渠道」添加需要的渠道，保存并单独测试送达。
@@ -146,7 +146,7 @@ cargo run --release --locked
 ```bash
 cargo build --release --features desktop --locked
 bash tools/package-macos-dmg.sh release
-bash tools/verify-macos-dmg.sh dist/枕安-0.3.9-Mac-x86_64.dmg
+bash tools/verify-macos-dmg.sh dist/枕安-0.3.10-Mac-x86_64.dmg
 ```
 
 打包脚本需要 `bin/ffmpeg` 和已下载的模型，输出 `dist/枕安-版本-Mac-架构.dmg` 及 SHA-256 校验文件；上方验证示例针对 Intel Mac。`CARGO_TARGET_DIR` 可覆盖默认构建目录。ZIP 打包见 `tools/package-macos-archive.sh`，图标生成见 `tools/build-icons.sh`。
