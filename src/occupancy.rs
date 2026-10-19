@@ -176,6 +176,7 @@ mod multi_safety_tests {
 }
 #[derive(Default)]
 pub struct Tracker {
+    max_gap: f64,
     region: Option<Region>,
     bed: Option<Region>,
     anchor: Option<Head>,
@@ -183,6 +184,13 @@ pub struct Tracker {
     last: Option<f64>,
 }
 impl Tracker {
+    pub fn set_analysis_fps(&mut self, fps: u8) {
+        let gap = (1.5 / fps.clamp(1, 4) as f64).max(0.8);
+        if self.max_gap != gap {
+            self.clear();
+            self.max_gap = gap;
+        }
+    }
     pub fn clear(&mut self) {
         self.anchor = None;
         self.last = None;
@@ -228,7 +236,9 @@ impl Tracker {
         }
         let head = heads[0];
         let center = |h: &Head| [(h.bbox[0] + h.bbox[2]) / 2., (h.bbox[1] + h.bbox[3]) / 2.];
-        let continuous = self.last.is_some_and(|t| now >= t && now - t <= 0.8)
+        let continuous = self
+            .last
+            .is_some_and(|t| now >= t && now - t <= self.max_gap.max(0.8))
             && self.anchor.as_ref().is_some_and(|a| {
                 let (a, b) = (center(a), center(head));
                 (a[0] - b[0]).hypot(a[1] - b[1]) <= 0.04
@@ -244,6 +254,25 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn one_fps_preserves_continuity_but_missing_samples_reset_it() {
+        let mut t = Tracker::default();
+        t.set_analysis_fps(1);
+        let bed = [0., 0., 1., 1.].into();
+        let rest = Some([0., 0., 1., 1.].into());
+        for second in 0..3 {
+            assert!(!t.update(second as f64, &[head(0.3)], &bed, &rest, Pose::Unknown, 1));
+        }
+        assert!(t.update(3., &[head(0.3)], &bed, &rest, Pose::Unknown, 1));
+        assert!(!t.update(5., &[head(0.3)], &bed, &rest, Pose::Unknown, 1));
+        let mut rule = crate::rules::Rule::default();
+        for second in 0..3 {
+            assert!(!rule.update_policy(Pose::Lying, second as f64, 1.5, 60., false, false));
+        }
+        assert!(!rule.update_policy(Pose::Upright, 3., 1.5, 60., false, false));
+        assert!(!rule.update_policy(Pose::Upright, 4., 1.5, 60., false, false));
+        assert!(rule.update_policy(Pose::Upright, 5., 1.5, 60., false, false));
+    }
     fn head(x: f32) -> Head {
         Head {
             bbox: [x, 0.3, x + 0.08, 0.4],

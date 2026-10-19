@@ -89,15 +89,19 @@ pub fn classify(l: &Reference, u: &Reference, p: &Reference) -> Pose {
 #[derive(Default)]
 pub struct Samples {
     rows: Vec<(Instant, Reference)>,
+    window_secs: f64,
 }
 impl Samples {
+    pub fn set_analysis_fps(&mut self, fps: u8) {
+        self.window_secs = (5. / fps.clamp(1, 4) as f64).max(2.5);
+    }
     pub fn clear(&mut self) {
         self.rows.clear()
     }
     pub fn push(&mut self, p: Option<Reference>) {
         let now = Instant::now();
         self.rows
-            .retain(|(t, _)| now.duration_since(*t).as_secs_f64() < 2.5);
+            .retain(|(t, _)| now.duration_since(*t).as_secs_f64() < self.window_secs.max(2.5));
         if let Some(p) = p.filter(Reference::valid) {
             self.rows.push((now, p));
         } else {
@@ -206,6 +210,25 @@ mod tests {
 mod sample_tests {
     use super::*;
     #[test]
+    fn one_fps_calibration_retains_five_stable_samples() {
+        let reference = Reference {
+            head: Some([0.4, 0.7]),
+            shoulders: None,
+        };
+        let now = Instant::now();
+        let mut samples = Samples::default();
+        samples.set_analysis_fps(1);
+        samples.rows = (1..5)
+            .rev()
+            .map(|n| (now - std::time::Duration::from_secs(n), reference.clone()))
+            .collect();
+        samples.push(Some(reference));
+        assert_eq!(samples.rows.len(), 5);
+        assert!(samples.capture().is_some());
+        samples.push(None);
+        assert!(samples.capture().is_none());
+    }
+    #[test]
     fn only_recent_stable_complete_samples_can_be_captured() {
         let reference = Reference {
             head: Some([0.4, 0.7]),
@@ -221,6 +244,7 @@ mod sample_tests {
                     )
                 })
                 .collect(),
+            ..Samples::default()
         };
         assert!(samples.capture().is_some());
         samples.rows[0].1.head = Some([0.9, 0.9]);

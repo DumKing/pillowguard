@@ -10,6 +10,10 @@ use tokio::{
     task::JoinHandle,
 };
 
+pub fn analysis_interval(fps: u8) -> Duration {
+    Duration::from_secs_f64(1. / fps.clamp(1, 4) as f64)
+}
+
 #[derive(Clone)]
 enum State {
     Waiting,
@@ -131,6 +135,12 @@ fn decoder_category(text: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+    #[test]
+    fn analysis_rate_uses_seconds_instead_of_frame_counts() {
+        assert_eq!(analysis_interval(1), Duration::from_secs(1));
+        assert_eq!(analysis_interval(2), Duration::from_millis(500));
+        assert_eq!(analysis_interval(4), Duration::from_millis(250));
+    }
     #[tokio::test]
     async fn slow_inference_never_blocks_producer_or_replays_a_backlog() {
         let (mut producer, input) = tokio::io::duplex(8);

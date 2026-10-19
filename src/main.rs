@@ -56,6 +56,7 @@ struct Config {
     bed: Region,
     rest_head_region: Option<Region>,
     hold: f64,
+    analysis_fps: u8,
     cooldown: f64,
     threshold: f32,
     person_confidence: f32,
@@ -85,6 +86,7 @@ impl Default for Config {
             bed: [0.1, 0.2, 0.8, 0.7].into(),
             rest_head_region: None,
             hold: 2.,
+            analysis_fps: 4,
             cooldown: 60.,
             threshold: 0.65,
             person_confidence: 0.5,
@@ -98,6 +100,9 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
+        if !(1..=4).contains(&self.analysis_fps) {
+            bail!("识别频率应为每秒 1 至 4 帧");
+        }
         self.care.validate(&self.bed)?;
         if let Some(r) = &self.rest_head_region {
             r.validate()?;
@@ -888,6 +893,7 @@ async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
             || c.schedule_windows != i.config.schedule_windows;
         if c.person_confidence != i.config.person_confidence
             || c.multiple_confidence != i.config.multiple_confidence
+            || c.analysis_fps != i.config.analysis_fps
         {
             i.samples.clear();
         }
@@ -1659,7 +1665,14 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
         };
         let connection_started = Instant::now();
         let mut last_analysis = Instant::now();
+        let mut last_analysis_start: Option<tokio::time::Instant> = None;
         loop {
+            if !replay {
+                let fps = app.inner.lock().unwrap().config.analysis_fps;
+                if let Some(last) = last_analysis_start {
+                    tokio::time::sleep_until(last + stream::analysis_interval(fps)).await;
+                }
+            }
             let read = if let Some(frames) = &mut live_frames {
                 frames.next().await
             } else {
@@ -1734,6 +1747,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 break;
             }
             let bytes = read.unwrap();
+            last_analysis_start = Some(tokio::time::Instant::now());
             index += 1;
             let detector = detector.clone();
             let c = app.inner.lock().unwrap().config.clone();
@@ -1761,6 +1775,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             }
             let people =
                 rules::monitor_people(&people, &c.bed, c.person_confidence, c.multiple_confidence);
+            occupancy.set_analysis_fps(if replay { 4 } else { c.analysis_fps });
             let (pose, count) = rules::classify(&people, &c.bed, c.threshold);
             let (pose, count, head_multiple) =
                 occupancy::head_safety(pose, count, &heads, &c.bed, c.multiple_confidence);
@@ -1789,6 +1804,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     continue;
                 }
                 if !replay {
+                    i.samples.set_analysis_fps(c.analysis_fps);
                     i.samples.push(reference.clone());
                 }
             }
@@ -1873,7 +1889,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             i.view.fps = if replay {
                 4.
             } else {
-                (1. / last_analysis.elapsed().as_secs_f64()).min(4.)
+                (1. / last_analysis.elapsed().as_secs_f64()).min(c.analysis_fps as f64)
             };
             last_analysis = Instant::now();
             i.view.message = if multi_recovering {
@@ -2573,6 +2589,38 @@ mod tests {
                 .count(),
             255
         );
+    }
+    #[test]
+    fn analysis_frequency_migrates_validates_and_survives_config_reload() {
+        let legacy: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.analysis_fps, 4);
+        let dir = std::env::temp_dir().join(format!(
+            "pillowguard-fps-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for fps in [1, 2, 3, 4] {
+            let c = Config {
+                analysis_fps: fps,
+                ..Config::default()
+            };
+            assert!(c.validate().is_ok());
+            write_config(&dir, &c).unwrap();
+            let saved: Config =
+                serde_json::from_slice(&std::fs::read(dir.join("config.json")).unwrap()).unwrap();
+            assert_eq!(saved.analysis_fps, fps);
+        }
+        for fps in [0, 5, 255] {
+            assert!(Config {
+                analysis_fps: fps,
+                ..Config::default()
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(serde_json::from_str::<Config>(r#"{"analysis_fps":1.5}"#).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn config_rejects_invalid() {
