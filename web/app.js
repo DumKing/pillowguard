@@ -1,5 +1,6 @@
 const $=id=>document.getElementById(id);
-let previewLoading=false,previewRequestAt=0;
+let previewMain=true;
+const pictureRequests={video:{loading:false,at:0},liveVideo:{loading:false,at:0}};
 let initialized=false, current=null, drag=null, pending=false, dirty=false, clearSourcePending=false, sourceTimer=null;
 let careDraft={edge_region:null,floor_region:null,escalation_channels:[]},carePendingSignature="";
 let activePage='monitor';try{activePage=localStorage.getItem('pillowguard-page')||localStorage.getItem('zhenan-page')||localStorage.getItem('shouwang-page')||'monitor'}catch{}
@@ -72,8 +73,12 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)hideChannel
 function updateVoteWindow(){$('vote_required').max=$('vote_window_frames').value}
 $('vote_window_frames').addEventListener('input',updateVoteWindow);
 function picturePath(state,mode,now){if(!state?.running||!state.schedule.active||!['camera','replay'].includes(state.mode))return null;const live=state.mode==='camera'&&mode===true,stamp=live?state.last_preview:state.last_frame;if(!stamp||now<stamp||now-stamp>=(live?2:5))return null;return live?'/preview.jpg':'/frame.jpg'}
-function refreshPreview(){const path=picturePath(current,$('realtimePreview').checked,Date.now()/1000);$('empty').style.display=path?'none':'flex';$('video').style.display=path?'block':'none';$('previewHint').textContent=current?.mode==='replay'?'回放显示逐帧分析结果。':$('realtimePreview').checked?'实时预览独立刷新，最高每秒 10 帧；关闭开关可查看含检测框的识别画面。':'识别画面含人物检测框，按设定的识别频率更新，不是连续预览。';if(!path){if($('video').hasAttribute('src'))$('video').removeAttribute('src');previewLoading=false;return}if(previewLoading||Date.now()-previewRequestAt<100)return;previewLoading=true;previewRequestAt=Date.now();$('video').src=path+'?t='+Date.now()}
-$('video').onload=$('video').onerror=()=>{previewLoading=false};
+function refreshPicture(id,path){const image=$(id),request=pictureRequests[id];image.style.display=path?'block':'none';if(!path){if(image.hasAttribute('src'))image.removeAttribute('src');request.loading=false;request.at=0;return}if(request.loading||Date.now()-request.at<100)return;request.loading=true;request.at=Date.now();image.src=path+'?t='+Date.now()}
+function positionPane(id,floating){const pane=$(id);pane.classList.toggle('is-floating',floating);if(floating){pane.setAttribute('role','button');pane.setAttribute('tabindex','0');pane.setAttribute('aria-label',id==='analysisPane'?'放大识别画面，缩小实时预览':'放大实时预览，缩小识别画面');pane.title='点击交换主画面与浮窗'}else{for(const name of ['role','tabindex','aria-label','title'])pane.removeAttribute(name)}}
+function refreshPreview(){const now=Date.now()/1000,dual=!!(current?.running&&current.schedule.active&&current.mode==='camera'&&$('realtimePreview').checked);if(!dual)previewMain=true;const analysis=picturePath(current,false,now),live=dual?picturePath(current,true,now):null,main=dual&&previewMain?live:analysis;$('livePane').hidden=!dual;positionPane('analysisPane',dual&&previewMain);positionPane('livePane',dual&&!previewMain);$('empty').style.display=main?'none':'flex';$('analysisWaiting').hidden=!!analysis||!dual||!previewMain;$('liveWaiting').hidden=!!live||!dual||previewMain;$('previewHint').textContent=current?.mode==='replay'?'回放显示逐帧分析结果。':dual?'实时预览与识别画面同时显示；点击右上角浮窗交换大小。调整床位区域时，请先将识别画面放大。':'识别画面含人物检测框，按设定的识别频率更新；开启实时预览可同时查看两幅画面。';refreshPicture('video',analysis);refreshPicture('liveVideo',live)}
+function swapPreview(){if(!current?.running||!current.schedule.active||current.mode!=='camera'||!$('realtimePreview').checked)return;previewMain=!previewMain;refreshPreview()}
+for(const id of ['video','liveVideo']){$(id).onload=$(id).onerror=()=>{pictureRequests[id].loading=false}}
+for(const id of ['analysisPane','livePane']){$(id).onclick=()=>{if($(id).classList.contains('is-floating'))swapPreview()};$(id).onkeydown=e=>{if($(id).classList.contains('is-floating')&&['Enter',' '].includes(e.key)){e.preventDefault();swapPreview()}}}
 $('realtimePreview').onchange=async()=>{const checked=$('realtimePreview').checked;$('realtimePreview').disabled=true;try{await post('config',{realtime_preview:checked});refreshPreview();toast(checked?'实时预览已开启并保存':'实时预览已关闭并保存')}catch(e){$('realtimePreview').checked=!checked;refreshPreview();toast(e.message)}finally{$('realtimePreview').disabled=false}};
 poll();setInterval(poll,750);setInterval(refreshPreview,100);
 

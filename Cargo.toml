@@ -1,6 +1,6 @@
 [package]
 name = "pillowguard"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 description = "Local-first bedside sitting-up monitoring and caregiver notifications"
 repository = "https://github.com/DumKing/pillowguard"
