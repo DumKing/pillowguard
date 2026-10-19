@@ -1,0 +1,27 @@
+const fs=require('node:fs'),assert=require('node:assert/strict');
+const js=fs.readFileSync('web/app.js','utf8');
+const line=name=>js.split('\n').find(s=>s.startsWith('function '+name+'('));
+const picturePath=new Function(line('picturePath')+';return picturePath')();
+const state={running:true,schedule:{active:true},mode:'camera',last_preview:99.9,last_frame:90};
+assert.equal(picturePath(state,true,100),'/preview.jpg');
+assert.equal(picturePath(state,false,100),null);
+assert.equal(picturePath({...state,last_frame:99.5},false,100),'/frame.jpg');
+assert.equal(picturePath({...state,mode:'replay',last_frame:99.5},true,100),'/frame.jpg');
+for(const changed of [{running:false},{schedule:{active:false}},{mode:'demo'},{last_preview:97},{last_preview:101}])assert.equal(picturePath({...state,...changed},true,100),null);
+let clock=100000,requests=[];
+const nodes={realtimePreview:{checked:true},empty:{style:{}},previewHint:{},video:{style:{},hasAttribute(){return !!this._src},removeAttribute(){this._src=''},set src(value){this._src=value;requests.push(value)}}};
+const refresh=new Function('$','Date',`let current=${JSON.stringify(state)},previewLoading=false,previewRequestAt=0;${line('picturePath')};${line('refreshPreview')};$('video').onload=$('video').onerror=()=>{previewLoading=false};return {refreshPreview,setState:s=>{current=s}}`)(id=>nodes[id],{now:()=>clock});
+refresh.refreshPreview();assert.equal(requests.length,1);assert(requests[0].startsWith('/preview.jpg?'));
+clock+=200;refresh.refreshPreview();assert.equal(requests.length,1,'never overlap pending image requests');
+nodes.video.onload();refresh.refreshPreview();assert.equal(requests.length,2);
+nodes.video.onerror();refresh.refreshPreview();assert.equal(requests.length,2,'maximum ten requests per second');
+clock+=100;refresh.refreshPreview();assert.equal(requests.length,3);
+refresh.setState({...state,running:false});refresh.refreshPreview();assert.equal(nodes.video.style.display,'none');assert.equal(nodes.video._src,'');
+console.log('PASS: live preview is independent of analysis freshness, replay fallback, stale/paused handling and request throttling');
+(async()=>{
+  const toggle={checked:true,disabled:false};let request,fail=false;
+  new Function('$','post','refreshPreview','toast',js.split('\n').find(s=>s.startsWith("$('realtimePreview').onchange=")))(()=>toggle,async(path,data)=>{request={path,data};if(fail)throw Error('save failed')},()=>{},()=>{});
+  await toggle.onchange();assert.deepEqual(request,{path:'config',data:{realtime_preview:true}});assert.equal(toggle.disabled,false);
+  toggle.checked=false;fail=true;await toggle.onchange();assert.equal(toggle.checked,true,'failed saves restore the prior switch state');assert.equal(toggle.disabled,false);
+  console.log('PASS: preview switch saves only its own field and rolls back on save failure');
+})().catch(e=>{console.error(e);process.exitCode=1});

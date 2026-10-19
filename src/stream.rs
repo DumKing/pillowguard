@@ -24,6 +24,7 @@ enum State {
 pub struct LatestFrames {
     receiver: watch::Receiver<State>,
     reader: JoinHandle<()>,
+    preview: Option<JoinHandle<()>>,
 }
 impl LatestFrames {
     pub fn new<R: AsyncRead + Unpin + Send + 'static>(
@@ -51,7 +52,48 @@ impl LatestFrames {
                 break;
             }
         });
-        Self { receiver, reader }
+        Self {
+            receiver,
+            reader,
+            preview: None,
+        }
+    }
+    pub fn start_preview(
+        &mut self,
+        enabled: impl Fn() -> bool + Send + 'static,
+        publish: impl Fn(Vec<u8>) -> bool + Send + 'static,
+    ) {
+        if let Some(task) = self.preview.take() {
+            task.abort();
+        }
+        let mut receiver = self.receiver.clone();
+        self.preview = Some(tokio::spawn(async move {
+            while receiver.changed().await.is_ok() {
+                let state = receiver.borrow_and_update().clone();
+                match state {
+                    State::Frame(bytes) => {
+                        if !enabled() {
+                            if !publish(vec![]) {
+                                break;
+                            }
+                            continue;
+                        }
+                        let jpeg =
+                            tokio::task::spawn_blocking(move || encode_preview(&bytes)).await;
+                        if let Ok(Ok(jpeg)) = jpeg {
+                            if !publish(jpeg) {
+                                break;
+                            }
+                        }
+                    }
+                    State::End(_) => {
+                        publish(vec![]);
+                        break;
+                    }
+                    State::Waiting => {}
+                }
+            }
+        }));
     }
     pub async fn next(&mut self) -> Result<Vec<u8>, &'static str> {
         self.receiver
@@ -68,7 +110,24 @@ impl LatestFrames {
 impl Drop for LatestFrames {
     fn drop(&mut self) {
         self.reader.abort();
+        if let Some(task) = self.preview.take() {
+            task.abort();
+        }
     }
+}
+
+fn encode_preview(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let frame = image::RgbImage::from_raw(1280, 720, bytes.to_vec())
+        .ok_or_else(|| anyhow::anyhow!("预览帧尺寸不正确"))?;
+    let small = image::imageops::resize(&frame, 640, 360, image::imageops::FilterType::Triangle);
+    let mut jpeg = vec![];
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75).encode(
+        small.as_raw(),
+        640,
+        360,
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(jpeg)
 }
 
 // Never expose decoder stderr: it may contain the authenticated camera URL.
@@ -135,6 +194,57 @@ fn decoder_category(text: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+    #[tokio::test]
+    async fn preview_updates_without_analysis_reads_and_keeps_original_pixels() {
+        let (mut producer, input) = tokio::io::duplex(65536);
+        let mut frames = LatestFrames::new(input, 1280 * 720 * 3, Duration::from_secs(12));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = enabled.clone();
+        frames.start_preview(
+            move || flag.load(std::sync::atomic::Ordering::Relaxed),
+            move |bytes| tx.send(bytes).is_ok(),
+        );
+        producer.write_all(&vec![0; 1280 * 720 * 3]).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        for color in [[220, 0, 0], [0, 0, 220]] {
+            let mut raw = vec![0; 1280 * 720 * 3];
+            for pixel in raw.chunks_exact_mut(3) {
+                pixel.copy_from_slice(&color);
+            }
+            producer.write_all(&raw).await.unwrap();
+            let jpeg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let preview = image::load_from_memory(&jpeg).unwrap().into_rgb8();
+            assert_eq!(preview.dimensions(), (640, 360));
+            let pixel = preview.get_pixel(320, 180).0;
+            assert!((pixel[0] as i16 - color[0] as i16).abs() < 5);
+            assert!((pixel[2] as i16 - color[2] as i16).abs() < 5);
+        }
+        // The inference consumer has not read even once during both previews.
+        let raw = frames.next().await.unwrap();
+        assert_eq!(&raw[..3], &[0, 0, 220]);
+        enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+        producer.write_all(&raw).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        drop(producer);
+        assert!(tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty());
+    }
     #[test]
     fn analysis_rate_uses_seconds_instead_of_frame_counts() {
         assert_eq!(analysis_interval(1), Duration::from_secs(1));

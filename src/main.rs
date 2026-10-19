@@ -57,6 +57,7 @@ struct Config {
     rest_head_region: Option<Region>,
     hold: f64,
     analysis_fps: u8,
+    realtime_preview: bool,
     cooldown: f64,
     threshold: f32,
     person_confidence: f32,
@@ -87,6 +88,7 @@ impl Default for Config {
             rest_head_region: None,
             hold: 2.,
             analysis_fps: 4,
+            realtime_preview: false,
             cooldown: 60.,
             threshold: 0.65,
             person_confidence: 0.5,
@@ -233,6 +235,7 @@ struct View {
     armed: bool,
     events: Vec<Event>,
     last_frame: Option<f64>,
+    last_preview: Option<f64>,
     alert: String,
     fps: f64,
     people: usize,
@@ -253,6 +256,7 @@ impl Default for View {
             armed: false,
             events: vec![],
             last_frame: None,
+            last_preview: None,
             alert: "尚未测试".into(),
             fps: 0.,
             people: 0,
@@ -280,6 +284,7 @@ struct Inner {
     camera_source: String,
     replay_source: String,
     frame: Vec<u8>,
+    preview: Vec<u8>,
     rule: Rule,
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -730,6 +735,33 @@ async fn frame(State(app): State<App>) -> Response {
     } else {
         ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
     }
+}
+async fn preview(State(app): State<App>) -> Response {
+    let i = app.inner.lock().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    if !i.config.realtime_preview
+        || !i.view.running
+        || i.view.mode.as_deref() != Some("camera")
+        || !i.config.active()
+        || !i
+            .view
+            .last_preview
+            .is_some_and(|t| now >= t && now - t < 2.)
+        || i.preview.is_empty()
+    {
+        return ([(header::CACHE_CONTROL, "no-store")], StatusCode::NOT_FOUND).into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        i.preview.clone(),
+    )
+        .into_response()
 }
 async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
     let result = (|| -> Result<()> {
@@ -1639,9 +1671,10 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
         } else {
             cmd.args(["-i", &source]);
         }
+        let video_filter = format!("fps={},scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1", if replay { 4 } else { 10 });
         cmd.args([
             "-vf",
-            "fps=4,scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
+            &video_filter,
             "-pix_fmt",
             "rgb24",
             "-f",
@@ -1663,6 +1696,31 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 Duration::from_secs(12),
             ))
         };
+        if let Some(frames) = &mut live_frames {
+            let preview_app = app.clone();
+            let enabled_app = app.clone();
+            frames.start_preview(
+                move || enabled_app.inner.lock().unwrap().config.realtime_preview,
+                move |jpeg| {
+                    let mut i = preview_app.inner.lock().unwrap();
+                    if i.generation != generation || !i.view.running {
+                        return false;
+                    }
+                    i.view.last_preview = if jpeg.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs_f64(),
+                        )
+                    };
+                    i.preview = jpeg;
+                    true
+                },
+            );
+        }
         let connection_started = Instant::now();
         let mut last_analysis = Instant::now();
         let mut last_analysis_start: Option<tokio::time::Instant> = None;
@@ -2036,6 +2094,8 @@ async fn action(
                 i.samples.clear();
                 i.view.assisted = false;
                 i.frame.clear();
+                i.preview.clear();
+                i.view.last_preview = None;
                 i.view.running = true;
                 i.view.mode = Some(mode.into());
                 i.view.pose = Pose::Unknown;
@@ -2128,6 +2188,8 @@ async fn action(
                 i.view.last_frame = None;
                 i.view.suspected_lying = false;
                 i.view.message = "已停止".into();
+                i.preview.clear();
+                i.view.last_preview = None;
             }
             "demo" => {
                 if !i.view.running || i.view.mode.as_deref() != Some("demo") {
@@ -2285,6 +2347,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
             camera_source: saved.camera_source,
             replay_source: saved.replay_source,
             frame: vec![],
+            preview: vec![],
             rule: Rule::default(),
             generation: 0,
             task: None,
@@ -2346,6 +2409,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
         .route("/api/ha-check", post(ha_check))
         .route("/api/source/reveal", post(source_reveal))
         .route("/frame.jpg", get(frame))
+        .route("/preview.jpg", get(preview))
         .route("/api/alert-capture/{id}", get(alert_capture))
         .route("/api/config", post(save))
         .route("/api/token/{action}", post(token_action))
@@ -2594,6 +2658,8 @@ mod tests {
     fn analysis_frequency_migrates_validates_and_survives_config_reload() {
         let legacy: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.analysis_fps, 4);
+        assert!(!legacy.realtime_preview);
+
         let dir = std::env::temp_dir().join(format!(
             "pillowguard-fps-{}-{}",
             std::process::id(),
@@ -2603,6 +2669,7 @@ mod tests {
         for fps in [1, 2, 3, 4] {
             let c = Config {
                 analysis_fps: fps,
+                realtime_preview: true,
                 ..Config::default()
             };
             assert!(c.validate().is_ok());
@@ -2610,6 +2677,7 @@ mod tests {
             let saved: Config =
                 serde_json::from_slice(&std::fs::read(dir.join("config.json")).unwrap()).unwrap();
             assert_eq!(saved.analysis_fps, fps);
+            assert!(saved.realtime_preview);
         }
         for fps in [0, 5, 255] {
             assert!(Config {
