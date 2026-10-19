@@ -10,6 +10,7 @@ mod notifications;
 mod occupancy;
 mod region;
 mod rules;
+mod stream;
 use region::{Region, RegionLike};
 mod vision;
 mod wecom_app;
@@ -1642,14 +1643,38 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
         let mut child = cmd.spawn()?;
-        let mut output = child.stdout.take().unwrap();
+        let decoder_diagnostics = stream::DecoderDiagnostics::new(child.stderr.take().unwrap());
+        let mut output = Some(child.stdout.take().unwrap());
+        let mut live_frames = if replay {
+            None
+        } else {
+            Some(stream::LatestFrames::new(
+                output.take().unwrap(),
+                1280 * 720 * 3,
+                Duration::from_secs(12),
+            ))
+        };
+        let connection_started = Instant::now();
+        let mut last_analysis = Instant::now();
         loop {
-            let mut bytes = vec![0u8; 1280 * 720 * 3];
-            let read =
-                tokio::time::timeout(Duration::from_secs(12), output.read_exact(&mut bytes)).await;
+            let read = if let Some(frames) = &mut live_frames {
+                frames.next().await
+            } else {
+                let mut bytes = vec![0u8; 1280 * 720 * 3];
+                match tokio::time::timeout(
+                    Duration::from_secs(12),
+                    output.as_mut().unwrap().read_exact(&mut bytes),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => Ok(bytes),
+                    Err(_) => Err("连续 12 秒未收到完整视频帧"),
+                    Ok(Err(_)) => Err("视频解码进程输出结束"),
+                }
+            };
             {
                 let i = app.inner.lock().unwrap();
                 if i.generation != generation || !i.view.running {
@@ -1661,7 +1686,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 let _ = child.kill().await;
                 break;
             }
-            if !matches!(read, Ok(Ok(_))) {
+            if let Err(reason) = read {
                 occupancy.clear();
                 multi_pause = occupancy::MultiPause::default();
                 let status = child.try_wait()?;
@@ -1689,12 +1714,26 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     i.view.suspected_lying = false;
                     if i.view.message != "视频流中断，5 秒后重新连接" {
                         App::event(&mut i, "摄像头断流，当前无法判断姿态");
+                        App::event(
+                            &mut i,
+                            format!(
+                                "取流诊断：{reason}；{}；本次连接 {} 秒；解码进程{}",
+                                decoder_diagnostics.summary(),
+                                connection_started.elapsed().as_secs(),
+                                if status.is_some() {
+                                    "已退出"
+                                } else {
+                                    "仍在运行"
+                                }
+                            ),
+                        );
                     }
                     i.view.message = "视频流中断，5 秒后重新连接".into();
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }
+            let bytes = read.unwrap();
             index += 1;
             let detector = detector.clone();
             let c = app.inner.lock().unwrap().config.clone();
@@ -1831,7 +1870,12 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             i.view.suspected_lying = suspected;
             i.view.last_frame = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
             i.view.video_position = if replay { index as f64 / 4. } else { 0. };
-            i.view.fps = 4.;
+            i.view.fps = if replay {
+                4.
+            } else {
+                (1. / last_analysis.elapsed().as_secs_f64()).min(4.)
+            };
+            last_analysis = Instant::now();
             i.view.message = if multi_recovering {
                 "多人状态恢复确认中，连续 3 秒无多人证据后恢复判断"
             } else if head_multiple {
