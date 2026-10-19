@@ -56,9 +56,11 @@ struct Config {
     bed: Region,
     rest_head_region: Option<Region>,
     hold: f64,
+    alarm_mode: String,
+    vote_window_frames: usize,
+    vote_required: usize,
     analysis_fps: u8,
     realtime_preview: bool,
-    capture_window_frames: usize,
     cooldown: f64,
     threshold: f32,
     person_confidence: f32,
@@ -88,9 +90,11 @@ impl Default for Config {
             bed: [0.1, 0.2, 0.8, 0.7].into(),
             rest_head_region: None,
             hold: 2.,
+            alarm_mode: "duration".into(),
+            vote_window_frames: 5,
+            vote_required: 4,
             analysis_fps: 4,
             realtime_preview: false,
-            capture_window_frames: 5,
             cooldown: 60.,
             threshold: 0.65,
             person_confidence: 0.5,
@@ -104,8 +108,11 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
-        if !(1..=captures::MAX_FRAMES).contains(&self.capture_window_frames) {
-            bail!("告警留存窗口应为 1 至 20 帧");
+        if !["duration", "frames"].contains(&self.alarm_mode.as_str())
+            || !(3..=20).contains(&self.vote_window_frames)
+            || !(2..=self.vote_window_frames).contains(&self.vote_required)
+        {
+            bail!("告警模式或帧投票参数无效：窗口 3 至 20 帧，至少坐起 2 次且不超过窗口帧数");
         }
         if !(1..=4).contains(&self.analysis_fps) {
             bail!("识别频率应为每秒 1 至 4 帧");
@@ -393,6 +400,8 @@ async fn state(State(app): State<App>) -> Json<Value> {
     v["care_alerts"] = json!(i.care_book.alerts);
     v["alert_captures"] = i.captures.metadata();
     v["capture_status"] = json!(i.captures.status);
+    let (samples, upright) = i.rule.vote_progress();
+    v["vote_progress"] = json!({"samples":samples,"upright":upright});
     v["config"] = json!(i.config);
     v["calibration"] = json!({"ready":assist::ready(&i.config.assist_lying,&i.config.assist_upright),"sample_ready":i.samples.capture().is_some()});
     v["push_channels"] = json!(i
@@ -412,6 +421,22 @@ async fn state(State(app): State<App>) -> Json<Value> {
     v["engine"] = json!("Rust / ONNX Runtime");
     v["schedule"] = json!({"active":i.config.active(),"clock":Utc::now().with_timezone(&Shanghai).format("%H:%M").to_string(),"hold":i.config.hold,"cooldown":i.config.cooldown,"timezone":"Asia/Shanghai"});
     Json(v)
+}
+fn decode_config(bytes: &[u8]) -> Result<Config> {
+    let mut value: Value = serde_json::from_slice(bytes)?;
+    if value.get("vote_window_frames").is_none() {
+        if let Some(n) = value.get("capture_window_frames").and_then(Value::as_u64) {
+            let n = n.clamp(3, 20);
+            value["vote_window_frames"] = json!(n);
+            if value.get("vote_required").is_none() {
+                value["vote_required"] = json!(n.min(4));
+            }
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.remove("capture_window_frames");
+    }
+    Ok(serde_json::from_value(value)?)
 }
 fn write_config(data: &Path, c: &Config) -> Result<()> {
     let path = data.join("config.json");
@@ -930,6 +955,10 @@ async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
         }
         let care_changed = serde_json::to_value(&c.care)? != serde_json::to_value(&i.config.care)?;
         let rule_changed = care_changed
+            || c.analysis_fps != i.config.analysis_fps
+            || c.alarm_mode != i.config.alarm_mode
+            || c.vote_window_frames != i.config.vote_window_frames
+            || c.vote_required != i.config.vote_required
             || c.alert_from_unknown != i.config.alert_from_unknown
             || geometry_changed
             || c.hold != i.config.hold
@@ -952,7 +981,7 @@ async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
             i.view.suspected_lying = false;
         }
         if rule_changed
-            || c.capture_window_frames != i.config.capture_window_frames
+            || c.vote_window_frames != i.config.vote_window_frames
             || c.analysis_fps != i.config.analysis_fps
         {
             i.recent_frames.clear();
@@ -1411,14 +1440,29 @@ fn observe_frame(
         }
         let c = i.config.clone();
         let from_unknown = c.alert_from_unknown && !i.rule.armed && !assisted;
-        let fired = i.rule.update_policy(
-            pose,
-            now,
-            c.hold,
-            c.cooldown,
-            active && assisted,
-            active && c.alert_from_unknown,
-        );
+        let fired = if !active {
+            i.rule.reset_baseline();
+            false
+        } else if c.alarm_mode == "frames" {
+            i.rule.update_window_policy(
+                pose,
+                now,
+                c.vote_window_frames,
+                c.vote_required,
+                c.cooldown,
+                assisted,
+                c.alert_from_unknown,
+            )
+        } else {
+            i.rule.update_policy(
+                pose,
+                now,
+                c.hold,
+                c.cooldown,
+                active && assisted,
+                active && c.alert_from_unknown,
+            )
+        };
         i.view.armed = i.rule.armed;
         if (pose == Pose::Lying && i.rule.armed) || pose == Pose::Multiple {
             if i.care_book
@@ -1809,6 +1853,8 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     i.view.last_frame = None;
                     i.view.suspected_lying = false;
                     i.recent_frames.clear();
+                    i.rule.reset_baseline();
+                    i.view.armed = false;
                     if i.view.message != "视频流中断，5 秒后重新连接" {
                         App::event(&mut i, "摄像头断流，当前无法判断姿态");
                         App::event(
@@ -1940,6 +1986,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     "head_conflict":head_conflict,"assisted":assisted,
                     "head_multiple":head_multiple,"multi_recovering":multi_recovering,
                     "threshold":c.threshold,"person_confidence":c.person_confidence,
+                    "alarm_mode":c.alarm_mode,"vote_window_frames":c.vote_window_frames,"vote_required":c.vote_required,"hold":c.hold,
                     "multiple_confidence":c.multiple_confidence,
                     "bed":c.bed,"rest_head_region":c.rest_head_region
                 }));
@@ -1948,7 +1995,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     let sample =
                         captures::Frame::new(timestamp, &i.frame, i.frame_evidence.clone());
                     i.recent_frames
-                        .push(timestamp, sample, c.capture_window_frames);
+                        .push(timestamp, sample, c.vote_window_frames);
                 }
                 i.view.last_frame =
                     Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
@@ -2308,7 +2355,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
     std::fs::create_dir_all(&data)?;
     let mut config: Config = std::fs::read(data.join("config.json"))
         .ok()
-        .and_then(|d| serde_json::from_slice(&d).ok())
+        .and_then(|d| decode_config(&d).ok())
         .unwrap_or_default();
     config.care.focus_sitting();
     config.validate()?;
@@ -2699,10 +2746,10 @@ mod tests {
         let legacy: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.analysis_fps, 4);
         assert!(!legacy.realtime_preview);
-        assert_eq!(legacy.capture_window_frames, 5);
+        assert_eq!(legacy.vote_window_frames, 5);
         for count in [0, 21] {
             assert!(Config {
-                capture_window_frames: count,
+                vote_window_frames: count,
                 ..Config::default()
             }
             .validate()
@@ -2738,6 +2785,35 @@ mod tests {
         }
         assert!(serde_json::from_str::<Config>(r#"{"analysis_fps":1.5}"#).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn legacy_capture_window_migrates_to_shared_window_and_votes_validate() {
+        let c = decode_config(br#"{"capture_window_frames":7,"hold":1.5}"#).unwrap();
+        assert_eq!(c.vote_window_frames, 7);
+        assert_eq!(c.vote_required, 4);
+        assert_eq!(c.alarm_mode, "duration");
+        assert_eq!(c.hold, 1.5);
+        assert!(serde_json::to_value(c)
+            .unwrap()
+            .get("capture_window_frames")
+            .is_none());
+        let c = decode_config(br#"{"capture_window_frames":1}"#).unwrap();
+        assert_eq!(c.vote_window_frames, 3);
+        assert_eq!(c.vote_required, 3);
+        assert!(c.validate().is_ok());
+        let c = decode_config(br#"{"capture_window_frames":7,"vote_window_frames":5,"vote_required":4,"alarm_mode":"frames"}"#).unwrap();
+        assert_eq!(c.vote_window_frames, 5);
+        assert!(c.validate().is_ok());
+        for (n, k) in [(2, 2), (5, 1), (5, 6), (21, 4)] {
+            assert!(Config {
+                alarm_mode: "frames".into(),
+                vote_window_frames: n,
+                vote_required: k,
+                ..Config::default()
+            }
+            .validate()
+            .is_err());
+        }
     }
     #[test]
     fn config_rejects_invalid() {

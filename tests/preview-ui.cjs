@@ -25,3 +25,10 @@ console.log('PASS: live preview is independent of analysis freshness, replay fal
   toggle.checked=false;fail=true;await toggle.onchange();assert.equal(toggle.checked,true,'failed saves restore the prior switch state');assert.equal(toggle.disabled,false);
   console.log('PASS: preview switch saves only its own field and rolls back on save failure');
 })().catch(e=>{console.error(e);process.exitCode=1});
+
+const controls={alarm_mode:{value:'frames'},voteSettings:{},hold:{},decisionStep:{},vote_required:{},vote_window_frames:{value:'7'}};
+const updateAlarmMode=new Function('$',line('updateAlarmMode')+';return updateAlarmMode')(id=>controls[id]);
+updateAlarmMode();assert.equal(controls.voteSettings.hidden,false);assert.equal(controls.hold.disabled,true);assert.equal(controls.vote_required.max,'7');
+controls.alarm_mode.value='duration';updateAlarmMode();assert.equal(controls.voteSettings.hidden,true);assert.equal(controls.hold.disabled,false);
+assert(!fs.readFileSync('web/index.html','utf8').includes('id="capture_window_frames"'));
+console.log('PASS: frame-vote mode disables duration and uses one shared window setting');

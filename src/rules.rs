@@ -238,6 +238,7 @@ pub fn head_supports_sitting(
 
 #[derive(Default)]
 pub struct Rule {
+    votes: std::collections::VecDeque<Pose>,
     lying: Option<f64>,
     upright: Option<f64>,
     pub armed: bool,
@@ -249,6 +250,7 @@ pub struct Rule {
 }
 impl Rule {
     pub fn reset_baseline(&mut self) {
+        self.votes.clear();
         self.lying = None;
         self.upright = None;
         self.armed = false;
@@ -326,6 +328,59 @@ impl Rule {
                 // Default: only confirmed lying rearms. Opt-in: stable unknown also rearms.
             }
             Pose::Multiple => self.reset_baseline(),
+        }
+        false
+    }
+    pub fn vote_progress(&self) -> (usize, usize) {
+        (
+            self.votes.len(),
+            self.votes.iter().filter(|p| **p == Pose::Upright).count(),
+        )
+    }
+    pub fn update_window_policy(
+        &mut self,
+        pose: Pose,
+        now: f64,
+        window: usize,
+        required: usize,
+        cooldown: f64,
+        assisted: bool,
+        from_unknown: bool,
+    ) -> bool {
+        if !now.is_finite() || !(3..=20).contains(&window) || !(2..=window).contains(&required) {
+            self.reset_baseline();
+            return false;
+        }
+        let was_ready = self.unknown_ready;
+        let was_latched = self.latched;
+        // Reuse baseline, cooldown and rearming policy, with duration firing
+        // disabled. Unknown results stay in this window instead of erasing it.
+        self.update_policy(pose, now, f64::INFINITY, cooldown, assisted, from_unknown);
+        if pose == Pose::Lying || pose == Pose::Multiple {
+            self.votes.clear();
+            return false;
+        }
+        if (!was_ready && self.unknown_ready) || (was_latched && !self.latched) {
+            self.votes.clear();
+        }
+        self.votes.push_back(pose);
+        while self.votes.len() > window {
+            self.votes.pop_front();
+        }
+        let (samples, upright) = self.vote_progress();
+        if pose == Pose::Upright
+            && samples == window
+            && upright >= required
+            && (self.armed || assisted || (from_unknown && self.unknown_ready))
+            && !self.latched
+            && self.last_alarm.is_none_or(|t| now - t >= cooldown)
+        {
+            self.armed = false;
+            self.unknown_ready = false;
+            self.latched = true;
+            self.last_alarm = Some(now);
+            self.votes.clear();
+            return true;
         }
         false
     }
@@ -803,5 +858,143 @@ mod multi_window_tests {
         }
         assert!(in_windows("all_day", &[], "12:00"));
         assert!(!in_windows("custom", &[], "12:00"));
+    }
+}
+
+#[cfg(test)]
+mod frame_window_tests {
+    use super::*;
+    fn tick(r: &mut Rule, p: Pose, t: f64) -> bool {
+        r.update_window_policy(p, t, 5, 4, 60., false, false)
+    }
+    fn armed() -> Rule {
+        let mut r = Rule::default();
+        tick(&mut r, Pose::Lying, 0.);
+        tick(&mut r, Pose::Lying, 2.);
+        r
+    }
+    #[test]
+    fn one_unknown_is_tolerated_and_full_window_is_required() {
+        let mut r = armed();
+        for (i, p) in [
+            Pose::Upright,
+            Pose::Upright,
+            Pose::Unknown,
+            Pose::Upright,
+            Pose::Upright,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(tick(&mut r, p, 2.5 + i as f64 / 2.), i == 4);
+        }
+        for i in 0..10 {
+            assert!(!tick(&mut r, Pose::Upright, 5. + i as f64 / 2.));
+        }
+    }
+    #[test]
+    fn latest_unknown_never_fires_and_window_slides() {
+        let mut r = armed();
+        for (i, p) in [
+            Pose::Upright,
+            Pose::Upright,
+            Pose::Upright,
+            Pose::Upright,
+            Pose::Unknown,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!tick(&mut r, p, 2.5 + i as f64 / 2.));
+        }
+        assert_eq!(r.vote_progress(), (5, 4));
+        assert!(tick(&mut r, Pose::Upright, 5.));
+        let mut r = armed();
+        for (i, p) in [
+            Pose::Upright,
+            Pose::Unknown,
+            Pose::Upright,
+            Pose::Unknown,
+            Pose::Upright,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!tick(&mut r, p, 2.5 + i as f64 / 2.));
+        }
+        assert_eq!(r.vote_progress(), (5, 3));
+    }
+    #[test]
+    fn lying_multiple_disconnect_and_nonfinite_clear_votes() {
+        for reset in [Pose::Lying, Pose::Multiple] {
+            let mut r = armed();
+            tick(&mut r, Pose::Upright, 2.5);
+            tick(&mut r, Pose::Upright, 3.);
+            assert!(!tick(&mut r, reset, 3.5));
+            assert_eq!(r.vote_progress(), (0, 0));
+            for i in 0..4 {
+                assert!(!tick(&mut r, Pose::Upright, 4. + i as f64 / 2.));
+            }
+        }
+        let mut r = armed();
+        tick(&mut r, Pose::Upright, 2.5);
+        tick(&mut r, Pose::Upright, 3.);
+        assert!(!tick(&mut r, Pose::Upright, 10.));
+        assert_eq!(r.vote_progress(), (1, 1));
+        assert!(!r.armed);
+        assert!(!tick(&mut r, Pose::Upright, f64::NAN));
+        assert_eq!(r.vote_progress(), (0, 0));
+    }
+    #[test]
+    fn unknown_opt_in_rearming_and_cooldown_still_apply() {
+        let mut r = Rule::default();
+        for i in 0..5 {
+            assert!(!r.update_window_policy(Pose::Unknown, i as f64 / 2., 5, 4, 60., false, true));
+        }
+        for i in 0..4 {
+            assert_eq!(
+                r.update_window_policy(Pose::Upright, 2.5 + i as f64 / 2., 5, 4, 60., false, true),
+                i == 3
+            );
+        }
+        for i in 0..5 {
+            assert!(!r.update_window_policy(
+                Pose::Unknown,
+                4.5 + i as f64 / 2.,
+                5,
+                4,
+                60.,
+                false,
+                true
+            ));
+        }
+        for i in 0..8 {
+            assert!(!r.update_window_policy(
+                Pose::Upright,
+                7. + i as f64 / 2.,
+                5,
+                4,
+                60.,
+                false,
+                true
+            ));
+        }
+        for i in 0..5 {
+            assert!(!r.update_window_policy(
+                Pose::Unknown,
+                64. + i as f64 / 2.,
+                5,
+                4,
+                60.,
+                false,
+                true
+            ));
+        }
+        for i in 0..4 {
+            assert_eq!(
+                r.update_window_policy(Pose::Upright, 66.5 + i as f64 / 2., 5, 4, 60., false, true),
+                i == 3
+            );
+        }
     }
 }
