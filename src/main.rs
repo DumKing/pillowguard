@@ -10,6 +10,7 @@ mod notifications;
 mod occupancy;
 mod region;
 mod rules;
+mod speaker;
 mod stream;
 use region::{Region, RegionLike};
 mod vision;
@@ -295,6 +296,7 @@ struct Inner {
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
     busy: bool,
+    speaker_batches: std::collections::HashMap<String, u64>,
     demo_pose: Pose,
 }
 #[derive(Clone)]
@@ -1139,6 +1141,105 @@ async fn notify_reason(
 ) {
     notify_dispatch(app, automatic, generation, only, reason, None).await;
 }
+fn speaker_batch_valid(
+    i: &Inner,
+    generation: u64,
+    route: &channels::Channel,
+    batch: u64,
+    c: &Config,
+    token: &str,
+    dispatch: Option<&Dispatch>,
+    reason: Option<&str>,
+) -> bool {
+    i.generation == generation
+        && i.view.running
+        && i.view.pose != Pose::Multiple
+        && (i.config.active() || i.view.mode.as_deref() == Some("demo"))
+        && i.speaker_batches.get(&route.id) == Some(&batch)
+        && i.escalation_id.is_none()
+        && i.config.ha_url == c.ha_url
+        && i.config.text_entity == c.text_entity
+        && i.token == token
+        && i.push_channels.iter().any(|r| {
+            r.id == route.id
+                && r.kind == "speaker"
+                && r.enabled
+                && r.speaker_playback == route.speaker_playback
+        })
+        && dispatch.is_none_or(|d| i.care_book.active(&d.id) && i.config.care.enabled(d.kind))
+        && (!matches!(reason, Some("lost" | "failure")) || i.config.lost_alert_enabled)
+        && (reason != Some("lost") || i.view.pose == Pose::Unknown)
+}
+async fn repeat_speaker(
+    app: App,
+    generation: u64,
+    route: channels::Channel,
+    batch: u64,
+    config: Config,
+    token: String,
+    dispatch: Option<Dispatch>,
+    reason: Option<&'static str>,
+    count: u32,
+) {
+    let outcome = speaker::repeat(
+        count,
+        Duration::from_secs_f64(speaker::pause_seconds(&config.alert_text)),
+        || {
+            speaker_batch_valid(
+                &app.inner.lock().unwrap(),
+                generation,
+                &route,
+                batch,
+                &config,
+                &token,
+                dispatch.as_ref(),
+                reason,
+            )
+        },
+        |play| {
+            let app = app.clone();
+            let config = config.clone();
+            let token = token.clone();
+            let name = route.name.clone();
+            async move {
+                let response = app
+                    .client
+                    .post(format!("{}/api/services/text/set_value", config.ha_url))
+                    .bearer_auth(&token)
+                    .timeout(Duration::from_secs(45))
+                    .json(&json!({"entity_id":config.text_entity,"value":config.alert_text}))
+                    .send()
+                    .await;
+                let (accepted, result) = match response {
+                    Ok(r) if r.status().is_success() => {
+                        (true, "请求已接受，请核实实际送达".to_owned())
+                    }
+                    Ok(r) => (
+                        false,
+                        format!("失败 HTTP {}，停止后续播报", r.status().as_u16()),
+                    ),
+                    Err(e) => (
+                        false,
+                        format!("{}，停止后续播报", notifications::transport_error(&e)),
+                    ),
+                };
+                App::event(
+                    &mut app.inner.lock().unwrap(),
+                    &format!("{name}：第 {play}/{count} 次播报，{result}"),
+                );
+                accepted
+            }
+        },
+    )
+    .await;
+    if outcome == speaker::Outcome::Cancelled {
+        App::event(
+            &mut app.inner.lock().unwrap(),
+            &format!("{}：状态或设置已变化，取消后续播报", route.name),
+        );
+    }
+}
+
 async fn notify_dispatch(
     app: App,
     automatic: bool,
@@ -1288,6 +1389,14 @@ async fn notify_dispatch(
         let client = app.client.clone();
         let enterprise = route.clone();
         let wecom_sender = app.wecom_sender.clone();
+        let play_count = route.speaker_playback.alert_count(
+            &Utc::now()
+                .with_timezone(&Shanghai)
+                .format("%H:%M")
+                .to_string(),
+            automatic && reason != Some("failure"),
+            dispatch.as_ref().is_some_and(|d| d.escalation),
+        );
         let secret = route.secret;
         let url = route.url;
         let live_app = app.clone();
@@ -1336,8 +1445,15 @@ async fn notify_dispatch(
                         json!({"title":title,"message":c.alert_text}),
                     )
                 };
-                match client.post(url).bearer_auth(t).timeout(Duration::from_secs(45)).json(&body).send().await {
-                    Ok(r) if r.status().is_success() => { accepted = true; "请求已接受，请核实实际送达".into() },
+                let batch = if channel == "speaker" { let mut i = live_app.inner.lock().unwrap(); let b = i.speaker_batches.entry(route_id.clone()).or_default(); *b = b.wrapping_add(1); *b } else { 0 };
+                match client.post(url).bearer_auth(&t).timeout(Duration::from_secs(45)).json(&body).send().await {
+                    Ok(r) if r.status().is_success() => {
+                        accepted = true;
+                        if channel == "speaker" && play_count > 1 {
+                            tokio::spawn(repeat_speaker(live_app.clone(), generation, enterprise.clone(), batch, c.clone(), t.clone(), live_dispatch.clone(), reason, play_count));
+                            format!("首次播报请求已接受，本轮计划共 {play_count} 次；请核实实际送达")
+                        } else { "请求已接受，请核实实际送达".into() }
+                    },
                     Ok(r) => format!("失败 HTTP {}", r.status().as_u16()),
                     Err(e) => notifications::transport_error(&e),
                 }
@@ -2419,6 +2535,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
             generation: 0,
             task: None,
             busy: false,
+            speaker_batches: Default::default(),
             demo_pose: Pose::Unknown,
         })),
         root,

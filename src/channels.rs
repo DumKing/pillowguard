@@ -16,12 +16,13 @@ pub struct Channel {
     pub touser: String,
     pub toparty: String,
     pub totag: String,
+    pub speaker_playback: crate::speaker::Playback,
 }
 impl Channel {
     pub fn public(&self) -> Value {
         json!({"id":self.id,"name":self.name,"kind":self.kind,"enabled":self.enabled,
             "has_url":!self.url.is_empty(),"has_secret":!self.secret.is_empty(),
-            "corp_id":self.corp_id,"agent_id":self.agent_id,"touser":self.touser,"toparty":self.toparty,"totag":self.totag})
+            "corp_id":self.corp_id,"agent_id":self.agent_id,"touser":self.touser,"toparty":self.toparty,"totag":self.totag,"speaker_playback":self.speaker_playback})
     }
 }
 #[derive(Deserialize)]
@@ -38,6 +39,7 @@ struct Edit {
     touser: Option<String>,
     toparty: Option<String>,
     totag: Option<String>,
+    speaker_playback: Option<crate::speaker::Playback>,
 
     clear_url: bool,
     clear_secret: bool,
@@ -56,6 +58,7 @@ impl Default for Edit {
             touser: None,
             toparty: None,
             totag: None,
+            speaker_playback: None,
 
             clear_url: false,
             clear_secret: false,
@@ -96,6 +99,9 @@ pub fn merge(value: &Value, previous: &[Channel]) -> Result<Vec<Channel>> {
             name,
             kind: edit.kind,
             enabled: edit.enabled,
+            speaker_playback: edit
+                .speaker_playback
+                .unwrap_or_else(|| old.map(|c| c.speaker_playback.clone()).unwrap_or_default()),
             url: old.map(|c| c.url.clone()).unwrap_or_default(),
             secret: old.map(|c| c.secret.clone()).unwrap_or_default(),
             corp_id: edit
@@ -119,6 +125,7 @@ pub fn merge(value: &Value, previous: &[Channel]) -> Result<Vec<Channel>> {
                 .map(|s| s.trim().to_owned())
                 .unwrap_or_else(|| old.map(|c| c.totag.clone()).unwrap_or_default()),
         };
+        channel.speaker_playback.validate()?;
         if edit.clear_url {
             channel.url.clear();
         } else if !edit.url.trim().is_empty() {
@@ -180,6 +187,29 @@ pub fn migrate(saved: &crate::credentials::Credentials, selected: &[String]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn speaker_playback_survives_public_merge_and_omitted_fields() {
+        let first=merge(&json!([{"id":"speaker-a","name":"音箱","kind":"speaker","speaker_playback":{"default_count":2,"windows":[{"start":"22:00","end":"07:00","count":4}]}}]),&[]).unwrap();
+        let public: Vec<_> = first.iter().map(Channel::public).collect();
+        let restored = merge(&json!(public), &first).unwrap();
+        assert_eq!(restored[0].speaker_playback, first[0].speaker_playback);
+        let omitted = merge(
+            &json!([{"id":"speaker-a","name":"音箱","kind":"speaker"}]),
+            &first,
+        )
+        .unwrap();
+        assert_eq!(omitted[0].speaker_playback, first[0].speaker_playback);
+        let empty=merge(&json!([{"id":"speaker-a","name":"音箱","kind":"speaker","speaker_playback":{"default_count":1,"windows":[]}}]),&first).unwrap();
+        assert!(empty[0].speaker_playback.windows.is_empty());
+        assert!(merge(&json!([{"id":"speaker-a","name":"音箱","kind":"speaker","speaker_playback":{"default_count":0}}]),&first).is_err());
+        let legacy: Channel = serde_json::from_value(json!({"id":"old","kind":"speaker"})).unwrap();
+        assert_eq!(legacy.speaker_playback.default_count, 1);
+        let saved = serde_json::to_string(&first).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<Channel>>(&saved).unwrap()[0].speaker_playback,
+            first[0].speaker_playback
+        );
+    }
     #[test]
     fn multiple_channels_keep_secrets_private_and_support_clear_and_remove() {
         let old=merge(&json!([{"id":"a","name":"家人群","kind":"webhook","url":"https://example.com/a","secret":"dummy"},{"id":"b","name":"照护群","kind":"webhook","url":"https://example.com/b"}]),&[]).unwrap();

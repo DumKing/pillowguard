@@ -144,6 +144,24 @@ mod tests {
             secret: "dummy-route-secret".into(),
             ..Default::default()
         }]);
+        all.push_channels
+            .as_mut()
+            .unwrap()
+            .push(crate::channels::Channel {
+                id: "test-speaker".into(),
+                name: "音箱".into(),
+                kind: "speaker".into(),
+                enabled: true,
+                speaker_playback: crate::speaker::Playback {
+                    default_count: 2,
+                    windows: vec![crate::speaker::Window {
+                        start: "22:00".into(),
+                        end: "07:00".into(),
+                        count: 4,
+                    }],
+                },
+                ..Default::default()
+            });
         save_all(&path, &all).unwrap();
         let restored = load_all(&path).unwrap();
         assert_eq!(
