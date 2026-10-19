@@ -1151,10 +1151,12 @@ fn speaker_batch_valid(
     dispatch: Option<&Dispatch>,
     reason: Option<&str>,
 ) -> bool {
+    let manual_test = reason == Some("playback_test");
     i.generation == generation
-        && i.view.running
-        && i.view.pose != Pose::Multiple
-        && (i.config.active() || i.view.mode.as_deref() == Some("demo"))
+        && (manual_test
+            || (i.view.running
+                && i.view.pose != Pose::Multiple
+                && (i.config.active() || i.view.mode.as_deref() == Some("demo"))))
         && i.speaker_batches.get(&route.id) == Some(&batch)
         && i.escalation_id.is_none()
         && i.config.ha_url == c.ha_url
@@ -1308,7 +1310,7 @@ async fn notify_dispatch(
                 .to_string(),
             i.view.people_uncertain,
         );
-        if let Some(reason) = reason {
+        if let Some(reason) = reason.filter(|r| *r != "playback_test") {
             settings.alert_text = if reason == "assisted" {
                 format!("疑似起身（遮挡辅助）：{}", settings.alert_text)
             } else if reason == "from_unknown" {
@@ -1394,7 +1396,7 @@ async fn notify_dispatch(
                 .with_timezone(&Shanghai)
                 .format("%H:%M")
                 .to_string(),
-            automatic && reason != Some("failure"),
+            (automatic && reason != Some("failure")) || reason == Some("playback_test"),
             dispatch.as_ref().is_some_and(|d| d.escalation),
         );
         let secret = route.secret;
@@ -2411,11 +2413,30 @@ async fn action(
             }
             "test-channel" => {
                 let id = data["id"].as_str().unwrap_or("").to_string();
-                if !i.push_channels.iter().any(|c| c.id == id) {
-                    bail!("渠道不存在");
+                let route = i
+                    .push_channels
+                    .iter()
+                    .find(|c| c.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("渠道不存在"))?;
+                let playback = data["use_playback_count"].as_bool().unwrap_or(false);
+                if playback
+                    && (route.kind != "speaker" || !route.enabled || i.escalation_id.is_some())
+                {
+                    bail!("请启用小爱音箱渠道，并等待升级播报结束后测试");
                 }
+                let generation = i.generation;
                 drop(i);
-                tokio::spawn(notify_routes(app.clone(), false, 0, Some(id)));
+                if playback {
+                    tokio::spawn(notify_reason(
+                        app.clone(),
+                        false,
+                        generation,
+                        Some(id),
+                        Some("playback_test"),
+                    ));
+                } else {
+                    tokio::spawn(notify_routes(app.clone(), false, 0, Some(id)));
+                }
             }
             "test-alert" => {
                 drop(i);
