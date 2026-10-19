@@ -240,6 +240,7 @@ pub fn head_supports_sitting(
 pub struct Rule {
     votes: std::collections::VecDeque<Pose>,
     lying: Option<f64>,
+    #[cfg(test)]
     upright: Option<f64>,
     pub armed: bool,
     pub last_alarm: Option<f64>,
@@ -252,7 +253,10 @@ impl Rule {
     pub fn reset_baseline(&mut self) {
         self.votes.clear();
         self.lying = None;
-        self.upright = None;
+        #[cfg(test)]
+        {
+            self.upright = None;
+        }
         self.armed = false;
         self.last_seen = None;
         self.unknown_since = None;
@@ -274,6 +278,7 @@ impl Rule {
     ) -> bool {
         self.update_policy(pose, now, hold, cooldown, assisted, false)
     }
+    #[cfg(test)]
     pub fn update_policy(
         &mut self,
         pose: Pose,
@@ -283,6 +288,23 @@ impl Rule {
         assisted: bool,
         from_unknown: bool,
     ) -> bool {
+        // Regression helper for old duration-based tests; not compiled in the app.
+        self.update_state(pose, now, from_unknown);
+        if pose == Pose::Upright
+            && (self.armed || assisted || (from_unknown && self.unknown_ready))
+            && !self.latched
+            && now - self.upright.unwrap_or(now) >= hold
+            && self.last_alarm.is_none_or(|a| now - a >= cooldown)
+        {
+            self.armed = false;
+            self.unknown_ready = false;
+            self.latched = true;
+            self.last_alarm = Some(now);
+            return true;
+        }
+        false
+    }
+    fn update_state(&mut self, pose: Pose, now: f64, from_unknown: bool) {
         if self.last_seen.is_some_and(|t| now - t > 3. || now < t) {
             self.reset_baseline();
         }
@@ -291,7 +313,10 @@ impl Rule {
             Pose::Lying => {
                 self.unknown_ready = false;
                 self.unknown_since = None;
-                self.upright = None;
+                #[cfg(test)]
+                {
+                    self.upright = None;
+                }
                 let t = *self.lying.get_or_insert(now);
                 if now - t >= 2. {
                     self.armed = true;
@@ -301,22 +326,17 @@ impl Rule {
             Pose::Upright => {
                 self.unknown_since = None;
                 self.lying = None;
-                let t = *self.upright.get_or_insert(now);
-                if (self.armed || assisted || (from_unknown && self.unknown_ready))
-                    && !self.latched
-                    && now - t >= hold
-                    && self.last_alarm.is_none_or(|a| now - a >= cooldown)
+                #[cfg(test)]
                 {
-                    self.armed = false;
-                    self.unknown_ready = false;
-                    self.latched = true;
-                    self.last_alarm = Some(now);
-                    return true;
+                    self.upright.get_or_insert(now);
                 }
             }
             Pose::Unknown => {
                 self.lying = None;
-                self.upright = None; // never count hidden time toward the sitting hold
+                #[cfg(test)]
+                {
+                    self.upright = None;
+                } // never count hidden time toward the sitting hold
                 let start = *self.unknown_since.get_or_insert(now);
                 if from_unknown && now - start >= 2. {
                     self.unknown_ready = true;
@@ -329,7 +349,6 @@ impl Rule {
             }
             Pose::Multiple => self.reset_baseline(),
         }
-        false
     }
     pub fn vote_progress(&self) -> (usize, usize) {
         (
@@ -353,9 +372,9 @@ impl Rule {
         }
         let was_ready = self.unknown_ready;
         let was_latched = self.latched;
-        // Reuse baseline, cooldown and rearming policy, with duration firing
-        // disabled. Unknown results stay in this window instead of erasing it.
-        self.update_policy(pose, now, f64::INFINITY, cooldown, assisted, from_unknown);
+        // Update baseline/rearming independently of votes. Unknown results stay
+        // in this window instead of erasing it.
+        self.update_state(pose, now, from_unknown);
         if pose == Pose::Lying || pose == Pose::Multiple {
             self.votes.clear();
             return false;

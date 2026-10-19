@@ -9,7 +9,7 @@ async function transition(){await api('demo',{pose:'unknown',select:true});await
 (async()=>{try{
 receiver=http.createServer((req,res)=>{let b='';req.on('data',v=>b+=v);req.on('end',()=>{messages.push(JSON.parse(b));res.end('{}')})});await new Promise(r=>receiver.listen(0,'127.0.0.1',r));
 let state=await boot();assert.equal(state.config.alert_from_unknown,false);assert.equal(state.config.care.confirmation,false,'manual confirmation is optional and off by default');
-await api('config',{lost_alert_enabled:false,hold:0.5,cooldown:5,push_channels:[{id:'local',name:'本地测试',kind:'webhook',enabled:true,url:'http://127.0.0.1:'+receiver.address().port}]});
+await api('config',{lost_alert_enabled:false,vote_window_frames:3,vote_required:2,cooldown:5,push_channels:[{id:'local',name:'本地测试',kind:'webhook',enabled:true,url:'http://127.0.0.1:'+receiver.address().port}]});
 await api('start',{mode:'demo'});await transition();assert.equal(messages.length,0,'disabled policy must require lying');await api('stop',{});
 await api('config',{alert_from_unknown:true});await stop();state=await boot();assert.equal(state.config.alert_from_unknown,true,'option survives restart');assert.equal(state.config.lost_alert_enabled,false,'anomaly reminder switch survives restart without suppressing rise alerts');assert.equal(state.calibration.ready,false,'no calibration required');
 await api('start',{mode:'demo'});await transition();assert.equal(messages.length,1);assert(JSON.stringify(messages[0]).includes('无法识别后检测到坐起'));assert(JSON.stringify(messages[0]).includes('演示告警'));assert(!JSON.stringify(messages[0]).includes('[告警 '),'automatic mode must not ask for console acknowledgement');

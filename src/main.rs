@@ -55,8 +55,6 @@ struct Config {
     channels: Vec<String>,
     bed: Region,
     rest_head_region: Option<Region>,
-    hold: f64,
-    alarm_mode: String,
     vote_window_frames: usize,
     vote_required: usize,
     analysis_fps: u8,
@@ -89,8 +87,6 @@ impl Default for Config {
             channels: vec!["speaker".into()],
             bed: [0.1, 0.2, 0.8, 0.7].into(),
             rest_head_region: None,
-            hold: 2.,
-            alarm_mode: "duration".into(),
             vote_window_frames: 5,
             vote_required: 4,
             analysis_fps: 4,
@@ -108,8 +104,7 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
-        if !["duration", "frames"].contains(&self.alarm_mode.as_str())
-            || !(3..=20).contains(&self.vote_window_frames)
+        if !(3..=20).contains(&self.vote_window_frames)
             || !(2..=self.vote_window_frames).contains(&self.vote_required)
         {
             bail!("告警模式或帧投票参数无效：窗口 3 至 20 帧，至少坐起 2 次且不超过窗口帧数");
@@ -189,9 +184,7 @@ impl Config {
         {
             bail!("请设置 1 至 16 个有效时间区间，开始与结束时间不能相同");
         }
-        if !self.hold.is_finite()
-            || !(0.5..=30.).contains(&self.hold)
-            || !self.cooldown.is_finite()
+        if !self.cooldown.is_finite()
             || !(5.0..=3600.).contains(&self.cooldown)
             || !self.threshold.is_finite()
             || !(0.4..=0.95).contains(&self.threshold)
@@ -419,7 +412,7 @@ async fn state(State(app): State<App>) -> Json<Value> {
     v["has_dingtalk_secret"] = json!(!i.dingtalk_secret.is_empty());
     v["head_detection_available"] = json!(app.root.join("models/head-detector.onnx").exists());
     v["engine"] = json!("Rust / ONNX Runtime");
-    v["schedule"] = json!({"active":i.config.active(),"clock":Utc::now().with_timezone(&Shanghai).format("%H:%M").to_string(),"hold":i.config.hold,"cooldown":i.config.cooldown,"timezone":"Asia/Shanghai"});
+    v["schedule"] = json!({"active":i.config.active(),"clock":Utc::now().with_timezone(&Shanghai).format("%H:%M").to_string(),"cooldown":i.config.cooldown,"timezone":"Asia/Shanghai"});
     Json(v)
 }
 fn decode_config(bytes: &[u8]) -> Result<Config> {
@@ -435,6 +428,8 @@ fn decode_config(bytes: &[u8]) -> Result<Config> {
     }
     if let Some(object) = value.as_object_mut() {
         object.remove("capture_window_frames");
+        object.remove("alarm_mode");
+        object.remove("hold");
     }
     Ok(serde_json::from_value(value)?)
 }
@@ -956,12 +951,10 @@ async fn save(State(app): State<App>, Json(data): Json<Value>) -> Response {
         let care_changed = serde_json::to_value(&c.care)? != serde_json::to_value(&i.config.care)?;
         let rule_changed = care_changed
             || c.analysis_fps != i.config.analysis_fps
-            || c.alarm_mode != i.config.alarm_mode
             || c.vote_window_frames != i.config.vote_window_frames
             || c.vote_required != i.config.vote_required
             || c.alert_from_unknown != i.config.alert_from_unknown
             || geometry_changed
-            || c.hold != i.config.hold
             || c.threshold != i.config.threshold
             || c.person_confidence != i.config.person_confidence
             || c.multiple_confidence != i.config.multiple_confidence
@@ -1443,7 +1436,7 @@ fn observe_frame(
         let fired = if !active {
             i.rule.reset_baseline();
             false
-        } else if c.alarm_mode == "frames" {
+        } else {
             i.rule.update_window_policy(
                 pose,
                 now,
@@ -1452,15 +1445,6 @@ fn observe_frame(
                 c.cooldown,
                 assisted,
                 c.alert_from_unknown,
-            )
-        } else {
-            i.rule.update_policy(
-                pose,
-                now,
-                c.hold,
-                c.cooldown,
-                active && assisted,
-                active && c.alert_from_unknown,
             )
         };
         i.view.armed = i.rule.armed;
@@ -1986,7 +1970,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     "head_conflict":head_conflict,"assisted":assisted,
                     "head_multiple":head_multiple,"multi_recovering":multi_recovering,
                     "threshold":c.threshold,"person_confidence":c.person_confidence,
-                    "alarm_mode":c.alarm_mode,"vote_window_frames":c.vote_window_frames,"vote_required":c.vote_required,"hold":c.hold,
+                    "vote_window_frames":c.vote_window_frames,"vote_required":c.vote_required,
                     "multiple_confidence":c.multiple_confidence,
                     "bed":c.bed,"rest_head_region":c.rest_head_region
                 }));
@@ -2791,8 +2775,8 @@ mod tests {
         let c = decode_config(br#"{"capture_window_frames":7,"hold":1.5}"#).unwrap();
         assert_eq!(c.vote_window_frames, 7);
         assert_eq!(c.vote_required, 4);
-        assert_eq!(c.alarm_mode, "duration");
-        assert_eq!(c.hold, 1.5);
+        let serialized = serde_json::to_value(&c).unwrap();
+        assert!(serialized.get("alarm_mode").is_none() && serialized.get("hold").is_none());
         assert!(serde_json::to_value(c)
             .unwrap()
             .get("capture_window_frames")
@@ -2806,7 +2790,6 @@ mod tests {
         assert!(c.validate().is_ok());
         for (n, k) in [(2, 2), (5, 1), (5, 6), (21, 4)] {
             assert!(Config {
-                alarm_mode: "frames".into(),
                 vote_window_frames: n,
                 vote_required: k,
                 ..Config::default()
