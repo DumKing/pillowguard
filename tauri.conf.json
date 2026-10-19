@@ -1,6 +1,6 @@
 {
   "productName": "枕安",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "identifier": "com.laoren.shouwang",
   "build": {
     "frontendDist": "web"

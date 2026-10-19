@@ -1559,6 +1559,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
     let begin = Instant::now();
     let mut index = 0u64;
     let mut occupancy = occupancy::Tracker::default();
+    let mut multi_pause = occupancy::MultiPause::default();
     loop {
         {
             let i = app.inner.lock().unwrap();
@@ -1568,6 +1569,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
         }
         while !app.inner.lock().unwrap().config.active() {
             occupancy.clear();
+            multi_pause = occupancy::MultiPause::default();
             {
                 let mut i = app.inner.lock().unwrap();
                 if i.generation != generation {
@@ -1649,6 +1651,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             }
             if !matches!(read, Ok(Ok(_))) {
                 occupancy.clear();
+                multi_pause = occupancy::MultiPause::default();
                 let status = child.try_wait()?;
                 let _ = child.kill().await;
                 observe(
@@ -1707,8 +1710,17 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             }
             let people =
                 rules::monitor_people(&people, &c.bed, c.person_confidence, c.multiple_confidence);
-            let (mut pose, count) = rules::classify(&people, &c.bed, c.threshold);
-            let uncertain = rules::uncertain_people(&people, &c.bed);
+            let (pose, count) = rules::classify(&people, &c.bed, c.threshold);
+            let (pose, count, head_multiple) =
+                occupancy::head_safety(pose, count, &heads, &c.bed, c.multiple_confidence);
+            let frame_time = if replay {
+                index as f64 / 4.
+            } else {
+                begin.elapsed().as_secs_f64()
+            };
+            let (mut pose, count, multi_recovering) = multi_pause.update(frame_time, pose, count);
+            let uncertain =
+                !head_multiple && !multi_recovering && rules::uncertain_people(&people, &c.bed);
             let reference = if count == 1 {
                 people
                     .iter()
@@ -1757,7 +1769,7 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                 pose,
                 count,
             );
-            draw_overlay(&mut bytes, &people, &c.bed);
+            draw_overlay(&mut bytes, &people, &c.bed, &heads, c.multiple_confidence);
             let mut jpeg = vec![];
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75).encode(
                 &bytes,
@@ -1799,7 +1811,11 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
             i.view.last_frame = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
             i.view.video_position = if replay { index as f64 / 4. } else { 0. };
             i.view.fps = 4.;
-            i.view.message = if uncertain {
+            i.view.message = if multi_recovering {
+                "多人状态恢复确认中，连续 3 秒无多人证据后恢复判断"
+            } else if head_multiple {
+                "检测到多个独立头部，已暂停坐起告警"
+            } else if uncertain {
                 "被子或遮挡影响人数判断，已暂停告警"
             } else if pose == Pose::Multiple {
                 "多人场景，监测暂停"
@@ -1827,7 +1843,13 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
         }
     }
 }
-fn draw_overlay(rgb: &mut [u8], people: &[rules::Person], bed: &Region) {
+fn draw_overlay(
+    rgb: &mut [u8],
+    people: &[rules::Person],
+    bed: &Region,
+    heads: &[occupancy::Head],
+    threshold: f32,
+) {
     let mut rect = |x1: f32, y1: f32, x2: f32, y2: f32, color: [u8; 3]| {
         let x1 = (x1 * 639.).clamp(0., 639.) as usize;
         let x2 = (x2 * 639.).clamp(0., 639.) as usize;
@@ -1857,6 +1879,10 @@ fn draw_overlay(rgb: &mut [u8], people: &[rules::Person], bed: &Region) {
                 [150, 150, 150]
             },
         );
+    }
+    for h in occupancy::distinct_heads(heads, bed, threshold) {
+        let b = h.bbox;
+        rect(b[0], b[1], b[2], b[3], [40, 190, 220]);
     }
     let points = bed.vertices();
     for k in 0..points.len() {
@@ -2360,15 +2386,34 @@ fn main() -> Result<()> {
             println!("候选框：{}", serde_json::to_string(&heads)?);
             return Ok(());
         }
+        let diagnostic: Option<Config> = std::env::args()
+            .skip_while(|a| a != "--self-test")
+            .nth(2)
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?;
+        let c = diagnostic.unwrap_or_else(|| Config {
+            bed: [0., 0., 1., 1.].into(),
+            person_confidence: 0.5,
+            multiple_confidence: 0.75,
+            threshold: 0.65,
+            rest_head_region: Some([0., 0., 1., 1.].into()),
+            ..Config::default()
+        });
+        c.validate()?;
         let (people, _, heads, head_conflict) = detector.detect_detailed(
             &rgb,
-            &[0., 0., 1., 1.].into(),
-            0.5,
-            0.75,
-            0.65,
-            Some(&[0., 0., 1., 1.].into()),
+            &c.bed,
+            c.person_confidence,
+            c.multiple_confidence,
+            c.threshold,
+            c.rest_head_region.as_ref(),
         )?;
-        let (mut pose, count) = rules::classify(&people, [0., 0., 1., 1.], 0.65);
+        let selected =
+            rules::monitor_people(&people, &c.bed, c.person_confidence, c.multiple_confidence);
+        let (pose, body_count) = rules::classify(&selected, &c.bed, c.threshold);
+        let (mut pose, count, head_multiple) =
+            occupancy::head_safety(pose, body_count, &heads, &c.bed, c.multiple_confidence);
+        println!("人体计数={body_count}, 多头部保护={head_multiple}");
         if head_conflict && pose == Pose::Upright {
             pose = Pose::Unknown;
         }

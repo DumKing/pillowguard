@@ -7,6 +7,7 @@ pub struct Detector {
     session: Session,
     head: Option<crate::head::Detector>,
     head_region: Option<crate::region::Region>,
+    head_bed: Option<crate::region::Region>,
     head_tick: u8,
     head_last: Option<std::time::Instant>,
     cached_heads: Vec<crate::occupancy::Head>,
@@ -22,6 +23,7 @@ impl Detector {
         Ok(Self {
             head,
             head_region: None,
+            head_bed: None,
             head_tick: 0,
             head_last: None,
             cached_heads: vec![],
@@ -41,6 +43,7 @@ impl Detector {
         threshold: f32,
         rest: Option<&crate::region::Region>,
     ) -> Result<(Vec<Person>, Vec<u8>, Vec<crate::occupancy::Head>, bool)> {
+        let started = std::time::Instant::now();
         let (people, preview, mut heads) =
             self.detect_inner(rgb, bed, single, multiple, threshold, rest)?;
         let selected = crate::rules::monitor_people(&people, bed, single, multiple);
@@ -48,17 +51,19 @@ impl Detector {
         if crate::rules::classify(&selected, bed, threshold).0 == crate::rules::Pose::Upright {
             // A proposed rise must be checked against THIS frame, never a cached
             // lying head from before the movement.
-            if let Some(head) = &mut self.head {
-                let frame = image::RgbImage::from_raw(1280, 720, rgb.to_vec()).unwrap();
-                let full: crate::region::Region = [0., 0., 1., 1.].into();
-                heads = head.detect_region(&frame, rest.unwrap_or(&full))?;
-                let strong: Vec<_> = heads
-                    .iter()
-                    .filter(|h| {
-                        h.score >= crate::occupancy::MIN_HEAD_CONFIDENCE
-                            && crate::region::overlap(bed, h.bbox) >= 0.7
-                    })
-                    .collect();
+            if self.head.is_some() {
+                if self.head_last.is_none_or(|last| last < started) {
+                    let frame = image::RgbImage::from_raw(1280, 720, rgb.to_vec()).unwrap();
+                    let probe = rest.unwrap_or(bed);
+                    self.head_last = Some(std::time::Instant::now());
+                    heads = self.head.as_mut().unwrap().detect_region(&frame, probe)?;
+                    self.cached_heads = heads.clone();
+                }
+                let strong = crate::occupancy::distinct_heads(
+                    &heads,
+                    bed,
+                    crate::occupancy::MIN_HEAD_CONFIDENCE,
+                );
                 if strong.len() == 1 {
                     if let Some(person) = selected.iter().find(|p| crate::rules::in_bed(p, bed)) {
                         conflict = crate::rules::head_contradicts_sitting(person, strong[0].bbox);
@@ -83,15 +88,20 @@ impl Detector {
             image::imageops::resize(&frame, 640, 360, image::imageops::FilterType::Triangle);
         let mut people = self.detect(preview.as_raw())?;
         let selected = crate::rules::monitor_people(&people, bed, single, multiple);
-        let unknown =
-            crate::rules::classify(&selected, bed, threshold).0 == crate::rules::Pose::Unknown;
-        if self.head_region.as_ref() != rest || !unknown || rest.is_none() {
+        let needs_heads =
+            crate::rules::classify(&selected, bed, threshold).0 != crate::rules::Pose::Multiple;
+        let probe_region = rest.unwrap_or(bed);
+        if self.head_region.as_ref() != Some(probe_region)
+            || self.head_bed.as_ref() != Some(bed)
+            || !needs_heads
+        {
             self.head_tick = 0;
             self.head_last = None;
             self.cached_heads.clear();
-            self.head_region = rest.cloned();
+            self.head_region = Some(probe_region.clone());
+            self.head_bed = Some(bed.clone());
         }
-        if unknown && rest.is_some() {
+        if needs_heads {
             // Head evidence is sampled at most once per four analysis frames.
             // Cached evidence lasts less than one second at the 4 fps input rate.
             if self.head_tick == 0
@@ -100,8 +110,8 @@ impl Detector {
                     .is_none_or(|t| t.elapsed().as_secs_f64() >= 1.)
             {
                 self.head_last = Some(std::time::Instant::now());
-                self.cached_heads = match (&mut self.head, rest) {
-                    (Some(head), Some(region)) => head.detect_region(&frame, region)?,
+                self.cached_heads = match &mut self.head {
+                    Some(head) => head.detect_region(&frame, probe_region)?,
                     _ => vec![],
                 };
             }
