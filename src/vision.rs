@@ -49,6 +49,7 @@ impl Detector {
         let selected = crate::rules::monitor_people(&people, bed, single, multiple);
         let mut conflict = false;
         if crate::rules::classify(&selected, bed, threshold).0 == crate::rules::Pose::Upright {
+            conflict = true;
             // A proposed rise must be checked against THIS frame, never a cached
             // lying head from before the movement.
             if self.head.is_some() {
@@ -59,15 +60,8 @@ impl Detector {
                     heads = self.head.as_mut().unwrap().detect_region(&frame, probe)?;
                     self.cached_heads = heads.clone();
                 }
-                let strong = crate::occupancy::distinct_heads(
-                    &heads,
-                    bed,
-                    crate::occupancy::MIN_HEAD_CONFIDENCE,
-                );
-                if strong.len() == 1 {
-                    if let Some(person) = selected.iter().find(|p| crate::rules::in_bed(p, bed)) {
-                        conflict = crate::rules::head_contradicts_sitting(person, strong[0].bbox);
-                    }
+                if let Some(person) = selected.iter().find(|p| crate::rules::in_bed(p, bed)) {
+                    conflict = !crate::rules::head_supports_sitting(person, &heads, bed);
                 }
             }
         }

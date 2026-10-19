@@ -11,6 +11,8 @@ struct Capture {
     label: String,
     demo: bool,
     jpeg: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence: Option<Value>,
 }
 pub struct Store {
     path: PathBuf,
@@ -52,7 +54,15 @@ impl Store {
             .find(|c| c.id == id && !c.jpeg.is_empty())?;
         STANDARD.decode(&c.jpeg).ok()
     }
-    pub fn record(&mut self, id: String, time: String, label: String, demo: bool, jpeg: &[u8]) {
+    pub fn record(
+        &mut self,
+        id: String,
+        time: String,
+        label: String,
+        demo: bool,
+        jpeg: &[u8],
+        evidence: Option<Value>,
+    ) {
         if self.entries.iter().any(|c| c.id == id) {
             return;
         }
@@ -63,6 +73,7 @@ impl Store {
                 time,
                 label,
                 demo,
+                evidence,
                 jpeg: if jpeg.len() <= 1_000_000 {
                     STANDARD.encode(jpeg)
                 } else {
@@ -113,14 +124,46 @@ mod tests {
         let path = dir.join("captures.json");
         let mut store = Store::load(path.clone());
         for n in 0..7 {
-            store.record(n.to_string(), "time".into(), "坐起".into(), false, &[n]);
+            store.record(
+                n.to_string(),
+                "time".into(),
+                "坐起".into(),
+                false,
+                &[n],
+                Some(json!({"pose":"upright"})),
+            );
         }
-        store.record("6".into(), "time".into(), "repeat".into(), false, &[99]);
+        store.record(
+            "6".into(),
+            "time".into(),
+            "repeat".into(),
+            false,
+            &[99],
+            None,
+        );
         let mut store = Store::load(path.clone());
         assert_eq!(store.metadata().as_array().unwrap().len(), 5);
         assert!(store.image("1").is_none());
         assert_eq!(store.image("6"), Some(vec![6]));
-        store.record("lost".into(), "time".into(), "断流".into(), false, &[]);
+        assert_eq!(
+            store.entries[0].evidence.as_ref().unwrap()["pose"],
+            "upright"
+        );
+        // Old installations have captures without diagnostic coordinates.
+        let mut old = serde_json::to_value(&store.entries[0]).unwrap();
+        old.as_object_mut().unwrap().remove("evidence");
+        assert!(serde_json::from_value::<Capture>(old)
+            .unwrap()
+            .evidence
+            .is_none());
+        store.record(
+            "lost".into(),
+            "time".into(),
+            "断流".into(),
+            false,
+            &[],
+            None,
+        );
         assert_eq!(store.metadata()[0]["has_image"], false);
         assert!(store.image("../captures.json").is_none());
         #[cfg(unix)]

@@ -256,6 +256,7 @@ impl Default for View {
     }
 }
 struct Inner {
+    frame_evidence: Option<serde_json::Value>,
     captures: captures::Store,
     care_book: care::Book,
     escalation_id: Option<String>,
@@ -545,8 +546,19 @@ fn trigger_care(app: &App, kind: care::Kind, reason: Option<&str>, generation: u
         persist_care(&i);
         let fresh = !demo && i.view.last_frame.is_some_and(|t| now >= t && now - t <= 2.);
         let image = if fresh { i.frame.clone() } else { vec![] };
-        i.captures
-            .record(id.clone(), clock, kind.label().into(), demo, &image);
+        let evidence = if fresh {
+            i.frame_evidence.clone()
+        } else {
+            None
+        };
+        i.captures.record(
+            id.clone(),
+            clock,
+            kind.label().into(),
+            demo,
+            &image,
+            evidence,
+        );
         App::event(
             &mut i,
             format!(
@@ -1783,6 +1795,15 @@ async fn monitor(app: App, source: String, replay: bool, generation: u64) -> Res
                     return Ok(());
                 }
                 i.frame = jpeg;
+                i.frame_evidence = Some(json!({
+                    "version":env!("CARGO_PKG_VERSION"),
+                    "pose":pose,"people":people,"heads":heads,
+                    "head_conflict":head_conflict,"assisted":assisted,
+                    "head_multiple":head_multiple,"multi_recovering":multi_recovering,
+                    "threshold":c.threshold,"person_confidence":c.person_confidence,
+                    "multiple_confidence":c.multiple_confidence,
+                    "bed":c.bed,"rest_head_region":c.rest_head_region
+                }));
                 i.view.last_frame =
                     Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64());
             }
@@ -2182,6 +2203,7 @@ async fn serve(ready: Option<std::sync::mpsc::Sender<()>>) -> Result<()> {
     };
     let app = App {
         inner: Arc::new(Mutex::new(Inner {
+            frame_evidence: None,
             captures: captures::Store::load(data.join("alert-captures.json")),
             care_book,
             escalation_id: None,
@@ -2410,6 +2432,15 @@ fn main() -> Result<()> {
         )?;
         let selected =
             rules::monitor_people(&people, &c.bed, c.person_confidence, c.multiple_confidence);
+        if std::env::var_os("PILLOWGUARD_DIAGNOSTIC_JOINTS").is_some() {
+            for p in &selected {
+                println!(
+                    "{}",
+                    json!({"bbox":p.bbox,"score":p.score,"points":p.points})
+                );
+            }
+            println!("{}", json!({"heads":heads,"head_conflict":head_conflict}));
+        }
         let (pose, body_count) = rules::classify(&selected, &c.bed, c.threshold);
         let (mut pose, count, head_multiple) =
             occupancy::head_safety(pose, body_count, &heads, &c.bed, c.multiple_confidence);

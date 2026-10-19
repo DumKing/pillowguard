@@ -10,7 +10,7 @@ pub enum Pose {
     Multiple,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Person {
     pub bbox: [f32; 4],
     pub score: f32,
@@ -200,6 +200,42 @@ pub fn head_contradicts_sitting(p: &Person, bbox: [f32; 4]) -> bool {
         || center[1] > bbox[3] + margin_y
 }
 
+/// A pose model can mistake raised hands for a face. Sitting needs positive
+/// corroboration from a fresh independent head detection, not just the absence
+/// of a high-confidence contradiction. This threshold does not count occupants.
+pub fn head_supports_sitting(
+    p: &Person,
+    heads: &[crate::occupancy::Head],
+    bed: &crate::region::Region,
+) -> bool {
+    heads.iter().any(|h| {
+        let b = h.bbox;
+        if !h.score.is_finite()
+            || h.score < 0.7
+            || !b.iter().all(|v| v.is_finite() && (0. ..=1.).contains(v))
+            || b[2] - b[0] < 0.008
+            || b[3] - b[1] < 0.008
+            || region::overlap(bed, b) < 0.7
+            || head_contradicts_sitting(p, b)
+        {
+            return false;
+        }
+        let mx = (b[2] - b[0]) * 0.15 + 0.005;
+        let my = (b[3] - b[1]) * 0.15 + 0.005;
+        p.points[..5]
+            .iter()
+            .filter(|q| {
+                valid_joint(q, 0.6)
+                    && q[0] >= b[0] - mx
+                    && q[0] <= b[2] + mx
+                    && q[1] >= b[1] - my
+                    && q[1] <= b[3] + my
+            })
+            .count()
+            >= 2
+    })
+}
+
 #[derive(Default)]
 pub struct Rule {
     lying: Option<f64>,
@@ -338,6 +374,62 @@ mod tests {
         let p = person(0.3);
         assert!(!head_contradicts_sitting(&p, [0.33, 0.12, 0.42, 0.25]));
         assert!(head_contradicts_sitting(&p, [0.62, 0.58, 0.72, 0.72]));
+    }
+    #[test]
+    fn sitting_requires_independent_head_agreement_even_below_occupancy_threshold() {
+        use crate::occupancy::Head;
+        let bed = [0., 0., 1., 1.].into();
+        let p = person(0.3);
+        let actual = Head {
+            bbox: [0.33, 0.12, 0.42, 0.25],
+            score: 0.8,
+        };
+        assert!(head_supports_sitting(&p, &[actual.clone()], &bed));
+        assert!(!head_supports_sitting(&p, &[], &bed));
+        let wrong = Head {
+            bbox: [0.62, 0.58, 0.72, 0.72],
+            score: 0.84,
+        };
+        assert!(!head_supports_sitting(&p, &[wrong], &bed));
+        let mut weak = actual.clone();
+        weak.score = 0.69;
+        assert!(!head_supports_sitting(&p, &[weak], &bed));
+        // Old broad negative-check margins could accept a face just outside
+        // the real head. Positive support must contain two visible landmarks.
+        let mut hands = p.clone();
+        hands.points[0][0] = 0.44;
+        hands.points[1][0] = 0.45;
+        assert!(!head_supports_sitting(&hands, &[actual.clone()], &bed));
+        let mut invalid = actual.clone();
+        invalid.bbox[0] = f32::NAN;
+        assert!(!head_supports_sitting(&p, &[invalid], &bed));
+        let outside = [0., 0.5, 1., 1.].into();
+        assert!(!head_supports_sitting(&p, &[actual], &outside));
+    }
+    #[test]
+    fn raised_hands_cannot_trigger_when_real_head_is_at_pillow() {
+        use crate::occupancy::Head;
+        let bed = [0., 0., 1., 1.].into();
+        let mut p = person(0.53);
+        for k in 0..5 {
+            p.points[k] = [0.61, 0.44, 0.9];
+        }
+        p.points[5] = [0.635, 0.518, 0.98];
+        p.points[6] = [0.585, 0.498, 0.98];
+        p.points[11] = [0.605, 0.649, 0.86];
+        p.points[12] = [0.572, 0.623, 0.87];
+        assert_eq!(classify(&[p.clone()], &bed, 0.55).0, Pose::Upright);
+        for score in [0.69, 0.7, 0.84, 0.87, 0.99] {
+            let heads = [Head {
+                bbox: [0.633, 0.528, 0.734, 0.673],
+                score,
+            }];
+            assert!(!head_supports_sitting(&p, &heads, &bed));
+            let mut rule = Rule::default();
+            for t in 0..20 {
+                assert!(!rule.update_policy(Pose::Unknown, t as f64, 1.5, 60., false, true));
+            }
+        }
     }
     #[test]
     fn raised_quilt_without_aligned_head_never_arms_sitting_alarm() {
